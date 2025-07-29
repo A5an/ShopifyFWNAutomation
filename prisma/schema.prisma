@@ -1,0 +1,134 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
+// enough when changing adapters.
+// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
+datasource db {
+  provider = "sqlite"
+  url      = "file:dev.sqlite"
+}
+
+model Session {
+  id            String    @id
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+}
+
+model Supplier {
+  id        String   @id @default(cuid())
+  name      String
+  invoices  Invoice[]
+  createdAt DateTime @default(now())
+}
+
+model Product {
+  id            String   @id @default(cuid())
+  name          String
+  skuFwn        String   @unique
+  supplierLinks SupplierSKU[]
+  cmpHistory    CMPRecord[]
+  invoiceItems  InvoiceItem[]
+  shopifySales  ShopifySale[]
+  createdAt     DateTime @default(now())
+}
+
+model SupplierSKU {
+  id         String   @id @default(cuid())
+  product    Product  @relation(fields: [productId], references: [id])
+  productId  String
+  sku        String
+  brand      String?
+}
+
+model Invoice {
+  id          String       @id @default(cuid())
+  supplier    Supplier     @relation(fields: [supplierId], references: [id])
+  supplierId  String
+  invoiceDate DateTime
+  shippingFee Float        @default(0)
+  currency    String       @default("EUR")
+  rate        Float        @default(1.0) // валютный курс
+  status      InvoiceStatus
+  items       InvoiceItem[]
+  logs        LogEntry[]
+  createdAt   DateTime     @default(now())
+}
+
+model InvoiceItem {
+  id         String   @id @default(cuid())
+  invoice    Invoice  @relation(fields: [invoiceId], references: [id])
+  invoiceId  String
+  product    Product? @relation(fields: [productId], references: [id])
+  productId  String?
+  sku        String
+  quantity   Int
+  unitPrice  Float    // с учетом скидки
+  total      Float
+}
+
+model CMPRecord {
+  id        String   @id @default(cuid())
+  product   Product  @relation(fields: [productId], references: [id])
+  productId String
+  calculatedAt DateTime @default(now())
+  quantity  Int
+  totalCost Float
+  cmpValue Float  // (totalCost / quantity)
+}
+
+model ShopifySale {
+  id           String   @id @default(cuid())
+  orderId      String
+  date         DateTime
+  sku          String
+  quantity     Int
+  unitPrice    Float
+  cmpAtSale    Float
+  marginPct    Float
+  product      Product? @relation(fields: [productId], references: [id])
+  productId    String?
+}
+
+model LogEntry {
+  id        String   @id @default(cuid())
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id])
+  invoiceId String?
+  type      LogType
+  status    String
+  message   String
+  createdAt DateTime @default(now())
+}
+
+enum InvoiceStatus {
+  PROCESSING
+  PENDING_REVIEW
+  SUCCESS
+  ERROR
+  CANCELLED
+}
+
+enum LogType {
+  UPLOAD
+  PROCESSING
+  PARSING
+  VALIDATION
+  CONFIRMATION
+  ERROR
+}

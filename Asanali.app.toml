@@ -1,0 +1,32 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "708b89729587df1f0fc1ab089b8856b0"
+name = "FWN"
+handle = "fwn"
+application_url = "https://bundle-builder.torespaceshop.kz"
+embedded = true
+
+[build]
+include_config_on_deploy = true
+automatically_update_urls_on_dev = false
+
+[webhooks]
+api_version = "2025-07"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "/webhooks/app/uninstalled"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/scopes_update" ]
+  uri = "/webhooks/app/scopes_update"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "write_products"
+
+[auth]
+redirect_urls = [ "https://bundle-builder.torespaceshop.kz/api/auth" ]
+
+[pos]
+embedded = false
