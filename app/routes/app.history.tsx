@@ -15,7 +15,6 @@ import {
   Select,
   TextField,
   BlockStack,
-  Icon,
   Popover,
   ActionList,
 } from "@shopify/polaris";
