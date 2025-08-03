@@ -19,10 +19,25 @@ import {
   ActionList,
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
-import { ArrowDownIcon, MenuVerticalIcon, ViewIcon } from "@shopify/polaris-icons";
+import { ArrowDownIcon, MenuHorizontalIcon, ViewIcon } from "@shopify/polaris-icons";
 import { authenticate } from "../shopify.server";
+import { getAllInvoices } from "../utils/invoice.server";
+import { getPdfUrl } from "../utils/fileUpload.server";
 
-// Mock invoice data - in real app this would come from database
+// Transform database invoice data for the UI
+function transformInvoicesForUI(invoices: any[]) {
+  return invoices.map(invoice => ({
+    id: invoice.id,
+    supplier: invoice.supplier.name,
+    status: invoice.status.toLowerCase(),
+    filename: invoice.pdfFileName || 'invoice.pdf',
+    createdAt: invoice.createdAt,
+    errorMessage: invoice.logs?.find((log: any) => log.status === 'ERROR')?.message || null,
+    pdfUrl: invoice.pdfFileName ? getPdfUrl(invoice.pdfFileName) : null,
+  }));
+}
+
+// Keep mock data as fallback
 const MOCK_INVOICES = [
   {
     id: "inv_temp_001",
@@ -92,12 +107,17 @@ const MOCK_INVOICES = [
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
   
-  // In real app, this would query the database with pagination, filtering, etc.
-  const invoices = MOCK_INVOICES.sort((a, b) => 
-    new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-  );
-  
-  return json({ invoices });
+  try {
+    // Get real invoices from database
+    const dbInvoices = await getAllInvoices();
+    const invoices = transformInvoicesForUI(dbInvoices);
+    
+    return json({ invoices });
+  } catch (error) {
+    console.error('Error loading invoices:', error);
+    // Fallback to mock data if database fails
+    return json({ invoices: MOCK_INVOICES });
+  }
 };
 
 function getStatusBadge(status: string, errorMessage?: string | null) {
@@ -203,7 +223,7 @@ export default function History() {
         activator={
           <Button
             variant="tertiary"
-            icon={MenuVerticalIcon}
+            icon={MenuHorizontalIcon}
             onClick={() => togglePopover(invoice.id)}
             accessibilityLabel="More actions"
           />

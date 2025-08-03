@@ -3,7 +3,7 @@
 client_id = "708b89729587df1f0fc1ab089b8856b0"
 name = "FWN"
 handle = "fwn"
-application_url = "https://linda-terrorism-chocolate-diagram.trycloudflare.com"
+application_url = "https://bundle-builder.torespaceshop.kz"
 embedded = true
 
 [build]
@@ -26,7 +26,7 @@ api_version = "2025-07"
 scopes = "write_products"
 
 [auth]
-redirect_urls = ["https://linda-terrorism-chocolate-diagram.trycloudflare.com/auth/callback", "https://linda-terrorism-chocolate-diagram.trycloudflare.com/auth/shopify/callback", "https://linda-terrorism-chocolate-diagram.trycloudflare.com/api/auth/callback"]
+redirect_urls = ["https://bundle-builder.torespaceshop.kz/auth/callback", "https://bundle-builder.torespaceshop.kz/auth/shopify/callback", "https://bundle-builder.torespaceshop.kz/api/auth/callback"]
 
 [pos]
 embedded = false

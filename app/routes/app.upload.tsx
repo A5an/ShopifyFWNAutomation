@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json, redirect } from "@remix-run/node";
-import { useActionData, useNavigation } from "@remix-run/react";
+import { useActionData, useNavigation, useLoaderData, useNavigate } from "@remix-run/react";
 import {
   Page,
   Layout,
@@ -18,20 +18,40 @@ import {
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
+import { savePdfFile } from "../utils/fileUpload.server";
+import { createInvoice, getAllSuppliers, getSupplierByName, createSupplier } from "../utils/invoice.server";
 
-// Mock suppliers data - in real app this would come from database
-const MOCK_SUPPLIERS = [
-  { label: "Select a supplier", value: "", disabled: true },
-  { label: "Bolero", value: "bolero" },
-  { label: "XYZ Foods", value: "xyz-foods" },
-  { label: "ABC Distributors", value: "abc-distributors" },
-  { label: "Fresh Market Co", value: "fresh-market" },
-  { label: "Euro Beverages", value: "euro-beverages" },
-];
+// Define proper types for Shopify Polaris Select component
+interface SelectOption {
+  label: string;
+  value: string;
+  disabled?: boolean;
+}
+
+interface Supplier {
+  id: string;
+  name: string;
+}
+
+// Transform suppliers for Select component
+function transformSuppliersForSelect(suppliers: Supplier[]): SelectOption[] {
+  return [
+    { label: "Select a supplier", value: "", disabled: true },
+    ...suppliers.map(supplier => ({
+      label: supplier.name,
+      value: supplier.id,
+    })),
+  ];
+}
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
-  return json({ suppliers: MOCK_SUPPLIERS });
+  
+  // Get real suppliers from database
+  const suppliers = await getAllSuppliers();
+  const selectOptions = transformSuppliersForSelect(suppliers);
+  
+  return json({ suppliers: selectOptions });
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -41,7 +61,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const supplier = formData.get("supplier") as string;
   const file = formData.get("invoice") as File;
 
-  // Mock validation and processing
+  // Validation
   if (!supplier) {
     return json({ error: "Please select a supplier" }, { status: 400 });
   }
@@ -50,40 +70,91 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return json({ error: "Please select a PDF file" }, { status: 400 });
   }
 
-  if (file.type !== "application/pdf") {
-    return json({ error: "Only PDF files are allowed" }, { status: 400 });
-  }
+  // Generate unique invoice ID
+  const invoiceId = `inv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  
+  try {
+    // Save the PDF file using our upload utility
+    const uploadResult = await savePdfFile(file, invoiceId);
+    
+    if (!uploadResult.success) {
+      return json({ error: uploadResult.error || "Failed to upload file" }, { status: 400 });
+    }
 
-  // Mock successful upload and processing
-  await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate processing time
-  
-  const invoiceId = "inv_temp_001"; // Mock invoice ID
-  
-  // Redirect to review page
-  return redirect(`/app/review/${invoiceId}`);
+    // Create invoice record in database with relative path
+    const relativePath = `/pdfs/${uploadResult.fileName}`;
+    const invoice = await createInvoice({
+      supplierId: supplier,
+      invoiceDate: new Date(), // Will be updated after PDF parsing
+      shippingFee: 0, // Will be updated after PDF parsing
+      currency: "EUR",
+      status: "PROCESSING", // Start with PROCESSING status
+      pdfFileName: uploadResult.fileName,
+      pdfFilePath: relativePath, // Store relative path
+      pdfFileSize: uploadResult.fileSize,
+      items: [], // Will be populated after PDF parsing
+    });
+    
+    console.log("Invoice created successfully:", {
+      invoiceId: invoice.id,
+      supplier: invoice.supplier.name,
+      fileName: uploadResult.fileName,
+      fileSize: uploadResult.fileSize,
+      originalFileName: uploadResult.originalFileName,
+    });
+    
+    // Simulate PDF processing time
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // In a real app, here you would:
+    // 1. Trigger PDF parsing service
+    // 2. Extract invoice data
+    // 3. Update invoice status to PENDING_REVIEW
+    // For now, we'll redirect to review with the database invoice ID
+    
+    // Return success with invoice ID for client-side navigation
+    return json({ 
+      success: true, 
+      invoiceId: invoice.id,
+      message: "Invoice uploaded successfully!" 
+    });
+  } catch (error) {
+    console.error("Upload error:", error);
+    return json({ error: "Failed to process upload. Please try again." }, { status: 500 });
+  }
 };
 
 export default function Upload() {
+  const { suppliers } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
+  const navigate = useNavigate();
   const [selectedSupplier, setSelectedSupplier] = useState("");
-  const [files, setFiles] = useState<File[]>([]);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [rejectedFiles, setRejectedFiles] = useState<File[]>([]);
+
+  // Handle successful upload navigation
+  useEffect(() => {
+    if (actionData && 'success' in actionData && actionData.success && actionData.invoiceId) {
+      // Navigate to review page after successful upload
+      navigate(`/app/review/${actionData.invoiceId}`);
+    }
+  }, [actionData, navigate]);
 
   const isSubmitting = navigation.state === "submitting";
 
   const handleDropZoneDrop = (droppedFiles: File[], acceptedFiles: File[], rejectedFiles: File[]) => {
-    setFiles(acceptedFiles);
+    setSelectedFile(acceptedFiles[0]);
     setRejectedFiles(rejectedFiles);
   };
 
   const validImageTypes = ['application/pdf'];
 
-  const fileUpload = !files.length && <DropZone.FileUpload />;
-  const uploadedFiles = files.length > 0 && (
+  const fileUpload = !selectedFile && <DropZone.FileUpload />;
+  const uploadedFiles = selectedFile && (
     <div style={{ padding: '14px' }}>
       <BlockStack gap="200">
-        {files.map((file, index) => (
+        {[selectedFile].map((file: File, index: number) => (
           <InlineStack key={index} gap="200" align="center">
             <Thumbnail
               size="small"
@@ -138,7 +209,7 @@ export default function Upload() {
                 <FormLayout>
                   <Select
                     label="Supplier"
-                    options={MOCK_SUPPLIERS}
+                    options={suppliers}
                     onChange={setSelectedSupplier}
                     value={selectedSupplier}
                     name="supplier"
@@ -163,16 +234,16 @@ export default function Upload() {
                   </div>
 
                   {/* Hidden file input for form submission */}
-                  {files.length > 0 && (
+                  {selectedFile && (
                     <input
                       type="file"
                       name="invoice"
                       accept=".pdf"
                       style={{ display: 'none' }}
                       ref={(input) => {
-                        if (input && files[0]) {
+                        if (input && selectedFile) {
                           const dt = new DataTransfer();
-                          dt.items.add(files[0]);
+                          dt.items.add(selectedFile);
                           input.files = dt.files;
                         }
                       }}
@@ -184,9 +255,9 @@ export default function Upload() {
                       variant="primary"
                       submit
                       loading={isSubmitting}
-                      disabled={!selectedSupplier || files.length === 0}
+                      disabled={!selectedSupplier || !selectedFile || isSubmitting}
                     >
-                      {isSubmitting ? "Uploading..." : "Upload Invoice"}
+                      {isSubmitting ? "Processing Upload..." : "Upload Invoice"}
                     </Button>
                     
                     <Button

@@ -20,61 +20,88 @@ import {
 } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
+import { getInvoiceById, updateInvoice, getAllSuppliers } from "../utils/invoice.server";
+import { getPdfUrl } from "../utils/fileUpload.server";
 
-// Mock extracted invoice data - in real app this would come from PDF processing
-const MOCK_EXTRACTED_DATA = {
-  inv_temp_001: {
-    id: "inv_temp_001",
-    supplier: "Bolero",
-    invoiceDate: "2025-07-25",
-    invoiceNumber: "BOL-2025-0725",
-    currency: "EUR",
-    shippingFee: 6.00,
-    items: [
-      {
-        id: "1",
-        sku: "ICE-LEMON",
-        name: "Ice Tea Lemon",
-        quantity: 20,
-        unitPrice: 3.30,
-        total: 66.00,
-      },
-      {
-        id: "2", 
-        sku: "ICE-PEACH",
-        name: "Ice Tea Peach",
-        quantity: 15,
-        unitPrice: 3.50,
-        total: 52.50,
-      },
-      {
-        id: "3",
-        sku: "WATER-500",
-        name: "Mineral Water 500ml",
-        quantity: 30,
-        unitPrice: 1.20,
-        total: 36.00,
-      },
-    ],
-    subtotal: 154.50,
-    totalAmount: 160.50,
-    filename: "bolero_invoice_20250725.pdf",
-  }
-};
+// Define types for better type safety
+interface InvoiceItem {
+  id: string;
+  sku: string;
+  name: string;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+}
+
+interface TransformedInvoice {
+  id: string;
+  supplier: string;
+  supplierId: string;
+  invoiceDate: string;
+  invoiceNumber: string;
+  currency: string;
+  shippingFee: number;
+  items: InvoiceItem[];
+  filename: string;
+  pdfUrl: string | null;
+  pdfFilePath: string | null;
+  status: string;
+  createdAt: Date;
+}
+
+// Transform database invoice data for the UI
+function transformInvoiceForUI(invoice: any): TransformedInvoice {
+  return {
+    id: invoice.id,
+    supplier: invoice.supplier.name,
+    supplierId: invoice.supplierId,
+    invoiceDate: invoice.invoiceDate.toISOString().split('T')[0],
+    invoiceNumber: `INV-${invoice.id.slice(-8).toUpperCase()}`,
+    currency: invoice.currency,
+    shippingFee: invoice.shippingFee,
+    items: invoice.items.map((item: any): InvoiceItem => ({
+      id: item.id,
+      sku: item.sku,
+      name: item.product?.name || item.sku,
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      total: item.total,
+    })),
+    filename: invoice.pdfFileName || 'invoice.pdf',
+    pdfUrl: invoice.pdfFileName ? getPdfUrl(invoice.pdfFileName) : null,
+    pdfFilePath: invoice.pdfFilePath || null,
+    status: invoice.status,
+    createdAt: invoice.createdAt,
+  };
+}
 
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
   
   const invoiceId = params.invoiceId;
   
-  // Mock data lookup - in real app this would query database
-  const extractedData = MOCK_EXTRACTED_DATA[invoiceId as keyof typeof MOCK_EXTRACTED_DATA];
+  if (!invoiceId) {
+    throw new Response("Invoice ID is required", { status: 400 });
+  }
   
-  if (!extractedData) {
+  // Get invoice from database
+  const invoice = await getInvoiceById(invoiceId);
+  
+  if (!invoice) {
     throw new Response("Invoice not found", { status: 404 });
   }
   
-  return json({ extractedData });
+  // Get all suppliers for the dropdown
+  const suppliers = await getAllSuppliers();
+  
+  // Transform invoice data for UI
+  const extractedData = transformInvoiceForUI(invoice);
+  
+  return json({ 
+    extractedData, 
+    suppliers: suppliers.map(s => ({ label: s.name, value: s.id })),
+    logs: invoice.logs || []
+  });
 };
 
 export const action = async ({ request, params }: ActionFunctionArgs) => {
@@ -387,34 +414,44 @@ export default function InvoiceReview() {
                 PDF Preview
               </Text>
               
+              {/* PDF Preview with real file */}
               <div style={{ 
                 height: "400px", 
-                backgroundColor: "#f6f6f7", 
                 border: "1px solid #c9cccf",
                 borderRadius: "4px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexDirection: "column",
-                gap: "16px"
+                overflow: "hidden"
               }}>
-                <Text variant="bodyMd" as="p" tone="subdued">
-                  📄 PDF Preview
-                </Text>
-                <Text variant="bodyMd" as="p" tone="subdued">
-                  {extractedData.filename}
-                </Text>
+                <iframe
+                  src={extractedData.pdfFilePath || '/pdfs/inv_1754051006458_5w2rz9yi2_1754051006461_psychology-cheat-sheet.pdf'}
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    border: "none"
+                  }}
+                  title="PDF Preview"
+                />
+              </div>
+              
+              <InlineStack gap="200">
                 <Button
                   variant="plain"
-                  onClick={() => alert(`Mock download: ${extractedData.filename}`)}
+                  url={extractedData.pdfUrl || ''}
+                  target="_blank"
+                >
+                  Open in New Tab
+                </Button>
+                <Button
+                  variant="plain"
+                  onClick={() => {
+                    const link = document.createElement('a');
+                    link.href = extractedData.pdfUrl || '';
+                    link.download = extractedData.filename;
+                    link.click();
+                  }}
                 >
                   Download Original
                 </Button>
-              </div>
-              
-              <Text variant="bodyMd" as="p" tone="subdued">
-                In a real implementation, this would show an embedded PDF viewer.
-              </Text>
+              </InlineStack>
             </BlockStack>
           </Card>
 
