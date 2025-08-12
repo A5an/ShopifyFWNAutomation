@@ -103,14 +103,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       originalFileName: uploadResult.originalFileName,
     });
     
-    // Simulate PDF processing time
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // In a real app, here you would:
-    // 1. Trigger PDF parsing service
-    // 2. Extract invoice data
-    // 3. Update invoice status to PENDING_REVIEW
-    // For now, we'll redirect to review with the database invoice ID
+    // Process PDF and extract invoice data
+    try {
+      const { processInvoicePdf } = await import("../services/invoiceProcessing.server");
+      await processInvoicePdf(invoice.id);
+    } catch (parseError) {
+      console.error("PDF parsing failed:", parseError);
+      // Note: Invoice status will be set to ERROR by processInvoicePdf
+      // We'll still redirect to review so user can see the error details
+    }
     
     // Return success with invoice ID for client-side navigation
     return json({ 

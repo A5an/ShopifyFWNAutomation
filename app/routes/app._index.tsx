@@ -191,6 +191,7 @@ export default function Index() {
                   </Text>
                   <List>
                     <List.Item>Bolero invoices</List.Item>
+                    <List.Item>Yamamoto invoices</List.Item>
                     <List.Item>XYZ Foods invoices</List.Item>
                     <List.Item>ABC Distributors invoices</List.Item>
                     <List.Item>Fresh Market Co invoices</List.Item>

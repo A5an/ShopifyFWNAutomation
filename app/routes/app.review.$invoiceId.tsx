@@ -62,7 +62,7 @@ function transformInvoiceForUI(invoice: any): TransformedInvoice {
     items: invoice.items.map((item: any): InvoiceItem => ({
       id: item.id,
       sku: item.sku,
-      name: item.product?.name || item.sku,
+      name: item.description || item.product?.name || item.sku,
       quantity: item.quantity,
       unitPrice: item.unitPrice,
       total: item.total,
@@ -109,6 +109,7 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   
   const formData = await request.formData();
   const action = formData.get("_action") as string;
+  const invoiceId = params.invoiceId!;
   
   if (action === "confirm") {
     // Mock confirmation - in real app this would save to database and update WAC
@@ -119,6 +120,19 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
   
   if (action === "reject") {
     return redirect("/app/upload?error=Invoice processing cancelled");
+  }
+  
+  if (action === "reparse") {
+    try {
+      const { reprocessInvoicePdf } = await import("../services/invoiceProcessing.server");
+      await reprocessInvoicePdf(invoiceId);
+      return json({ success: true, message: "PDF re-parsed successfully" });
+    } catch (error) {
+      console.error("Re-parsing failed:", error);
+      return json({ 
+        error: error instanceof Error ? error.message : "Re-parsing failed" 
+      }, { status: 500 });
+    }
   }
   
   return json({ error: "Invalid action" }, { status: 400 });
@@ -177,6 +191,7 @@ export default function InvoiceReview() {
 
   const supplierOptions = [
     { label: "Bolero", value: "Bolero" },
+    { label: "Yamamoto", value: "Yamamoto" },
     { label: "XYZ Foods", value: "XYZ Foods" },
     { label: "ABC Distributors", value: "ABC Distributors" },
     { label: "Fresh Market Co", value: "Fresh Market Co" },
@@ -228,7 +243,7 @@ export default function InvoiceReview() {
     </Button>,
   ]);
 
-  const headings = ["SKU", "Product Name", "Quantity", "Unit Price (€)", "Total (€)", "Actions"];
+  const headings = ["SKU", "Description", "Quantity", "Unit Price (€)", "Total (€)", "Actions"];
 
   return (
     <Page>
@@ -240,9 +255,15 @@ export default function InvoiceReview() {
               <p>Please review the extracted invoice data below. You can edit any fields if needed before confirming the import.</p>
             </Banner>
 
-            {actionData?.error && (
+            {actionData && 'error' in actionData && actionData.error && (
               <Banner tone="critical">
                 {actionData.error}
+              </Banner>
+            )}
+            
+            {actionData && 'success' in actionData && actionData.success && (
+              <Banner tone="success">
+                {actionData.message || 'Operation completed successfully'}
               </Banner>
             )}
 

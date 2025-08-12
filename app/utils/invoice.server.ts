@@ -12,6 +12,7 @@ export interface CreateInvoiceData {
   pdfFileSize?: number;
   items: {
     sku: string;
+    description?: string;
     quantity: number;
     unitPrice: number;
     total: number;
@@ -27,6 +28,7 @@ export interface UpdateInvoiceData {
   items?: {
     id?: string;
     sku: string;
+    description?: string;
     quantity: number;
     unitPrice: number;
     total: number;
@@ -49,6 +51,7 @@ export async function createInvoice(data: CreateInvoiceData) {
       items: {
         create: data.items.map(item => ({
           sku: item.sku,
+          description: item.description,
           quantity: item.quantity,
           unitPrice: item.unitPrice,
           total: item.total,
@@ -105,6 +108,7 @@ export async function updateInvoice(id: string, data: UpdateInvoiceData) {
         items: {
           create: data.items.map(item => ({
             sku: item.sku,
+            description: item.description,
             quantity: item.quantity,
             unitPrice: item.unitPrice,
             total: item.total,
