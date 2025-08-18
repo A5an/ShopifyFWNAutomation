@@ -4,6 +4,8 @@
 
 This system automatically extracts invoice data from PDF files using `pdf2json` library with supplier-specific parsing strategies. It's designed to handle different invoice formats and integrate seamlessly with the FWN invoice management workflow.
 
+As of recent updates, the system also includes Python-based table extraction for improved accuracy with complex PDF layouts.
+
 ## Architecture
 
 ```
@@ -99,7 +101,21 @@ return new GenericParser();
 }
 ```
 
-### 3. Business Logic Integration (`processInvoicePdf`)
+### 3. Python-Based Table Extraction (NEW)
+
+For complex PDF layouts, the system can optionally use Python libraries for better table extraction:
+
+```typescript
+// Use Python parser for better table extraction
+const result = await parseInvoiceFromPdf("path/to/invoice.pdf", "Yamamoto", true);
+```
+
+**What it does:**
+- Uses Python libraries (`camelot-py`, `pdfplumber`, `tabula-py`) for superior table extraction
+- Falls back to JavaScript parsing if Python extraction fails
+- Provides more accurate results for complex table layouts
+
+### 4. Business Logic Integration (`processInvoicePdf`)
 
 ```typescript
 await processInvoicePdf(invoiceId);
@@ -202,6 +218,50 @@ function selectParser(supplierName: string): InvoiceParser {
 ```
 PROCESSING → PENDING_REVIEW → SUCCESS
            ↘ ERROR (if parsing fails)
+```
+
+## Setting Up Python Integration (NEW)
+
+To use the enhanced Python-based PDF table extraction:
+
+### 1. Install Python Dependencies
+
+```bash
+# Run the setup script
+./setup-python.sh
+```
+
+Or manually install:
+
+```bash
+pip install -r python/requirements.txt
+```
+
+### 2. System Dependencies
+
+Some Python libraries require system-level dependencies:
+
+**macOS:**
+```bash
+brew install ghostscript
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install ghostscript python3-tk
+```
+
+**Windows:**
+Download and install Ghostscript from https://www.ghostscript.com/download.html
+
+### 3. Testing the Integration
+
+```bash
+# Test Python table extraction directly
+node test-python-integration.js
+
+# Test complete parsing flow with Python parser
+node test-parsing-integration.js
 ```
 
 ## Error Handling

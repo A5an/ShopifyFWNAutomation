@@ -359,6 +359,15 @@ This template uses [Remix](https://remix.run). The following Shopify tools are a
 - [Webhooks](https://github.com/Shopify/shopify-app-js/tree/main/packages/shopify-app-remix#authenticating-webhook-requests): Callbacks sent by Shopify when certain events occur
 - [Polaris](https://polaris.shopify.com/): Design system that enables apps to create Shopify-like experiences
 
+### PDF Processing Enhancement
+
+This app includes enhanced PDF processing capabilities using Python libraries for better table extraction:
+- [camelot-py](https://camelot-py.readthedocs.io/) for table detection and extraction
+- [pdfplumber](https://github.com/jsvine/pdfplumber) for precise PDF text and table extraction
+- [tabula-py](https://github.com/chezou/tabula-py) for Java-based table extraction
+
+See [PYTHON_SETUP_GUIDE.md](PYTHON_SETUP_GUIDE.md) for setup instructions.
+
 ## Resources
 
 - [Remix Docs](https://remix.run/docs/en/v1)

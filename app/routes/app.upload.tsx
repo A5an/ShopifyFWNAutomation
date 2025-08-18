@@ -20,6 +20,7 @@ import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import { savePdfFile } from "../utils/fileUpload.server";
 import { createInvoice, getAllSuppliers, getSupplierByName, createSupplier } from "../utils/invoice.server";
+import { createJob } from "../services/jobQueue.server";
 
 // Define proper types for Shopify Polaris Select component
 interface SelectOption {
@@ -103,14 +104,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       originalFileName: uploadResult.originalFileName,
     });
     
-    // Process PDF and extract invoice data
+    // Queue PDF processing job instead of processing synchronously
     try {
-      const { processInvoicePdf } = await import("../services/invoiceProcessing.server");
-      await processInvoicePdf(invoice.id);
-    } catch (parseError) {
-      console.error("PDF parsing failed:", parseError);
-      // Note: Invoice status will be set to ERROR by processInvoicePdf
-      // We'll still redirect to review so user can see the error details
+      await createJob({
+        type: "PDF_PROCESSING",
+        data: {
+          invoiceId: invoice.id,
+          supplierName: invoice.supplier.name,
+          fileName: uploadResult.fileName,
+        },
+        maxAttempts: 3,
+      });
+      
+      console.log(`PDF processing job queued for invoice ${invoice.id}`);
+      
+    } catch (jobError) {
+      console.error("Failed to queue PDF processing job:", jobError);
+      // Note: Invoice will remain in PROCESSING status
+      // The background worker will pick it up later
     }
     
     // Return success with invoice ID for client-side navigation

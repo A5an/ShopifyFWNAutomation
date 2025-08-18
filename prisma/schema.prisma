@@ -138,3 +138,37 @@ enum LogType {
   CONFIRMATION
   ERROR
 }
+
+// New job queue models
+model Job {
+  id          String      @id @default(cuid())
+  type        JobType
+  status      JobStatus   @default(PENDING)
+  data        String      // JSON payload
+  result      String?     // JSON result
+  error       String?     // Error message if failed
+  attempts    Int         @default(0)
+  maxAttempts Int         @default(3)
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  
+  @@index([status, type])
+  @@index([createdAt])
+}
+
+enum JobType {
+  PDF_PROCESSING
+  CMP_CALCULATION
+  SHOPIFY_SYNC
+  GOOGLE_SHEETS_EXPORT
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}

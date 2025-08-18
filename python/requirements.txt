@@ -1,0 +1,15 @@
+# Python requirements for PDF table extraction
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+camelot-py[cv]
+pdfplumber
+tabula-py
+pandas
+numpy
+
+# For camelot-py (if using)
+opencv-python
+
+# Optional dependencies for better performance
+ghostscript  # Required for some camelot operations

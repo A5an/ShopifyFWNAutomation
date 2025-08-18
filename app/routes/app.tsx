@@ -26,6 +26,7 @@ export default function App() {
         </Link>
         <Link to="/app/upload">Upload Invoice</Link>
         <Link to="/app/history">Import History</Link>
+        <Link to="/app/jobs">Background Jobs</Link>
       </NavMenu>
       <Outlet />
     </AppProvider>

@@ -30,6 +30,8 @@ export async function processInvoicePdf(invoiceId: string): Promise<void> {
     const pdfFilePath = getStoredPdfPath(invoice.pdfFileName);
     
     // Parse PDF using supplier-specific parser
+    // For Yamamoto and Swanson, Python parser will be used automatically
+    // For other suppliers, we can optionally use Python parser
     const parseResult = await parseInvoiceFromPdf(pdfFilePath, invoice.supplier.name);
     
     if (!parseResult.success || !parseResult.data) {
@@ -62,13 +64,7 @@ export async function processInvoicePdf(invoiceId: string): Promise<void> {
     // Map supplier SKUs to FWN products and prepare invoice items
     const mappedItems = await mapLineItemsToProducts(parseResult.data.lineItems, invoice.supplier.name);
     
-    // Calculate shipping fee per item
-    const shippingFeePerItem = calculateShippingFeePerItem(
-      parseResult.data.invoiceMetadata.shippingFee,
-      mappedItems
-    );
-    
-    // Prepare update data
+    // Keep PDF amounts exactly as parsed - shipping fee is tracked separately!
     const updateData: UpdateInvoiceData = {
       invoiceDate: parseResult.data.invoiceMetadata.invoiceDate || invoice.invoiceDate,
       shippingFee: parseResult.data.invoiceMetadata.shippingFee,
@@ -76,8 +72,10 @@ export async function processInvoicePdf(invoiceId: string): Promise<void> {
         sku: item.supplierSku,
         description: item.description, // Include parsed description
         quantity: item.quantity,
-        unitPrice: item.unitPrice + shippingFeePerItem, // Include shipping in unit price
-        total: item.total + (shippingFeePerItem * item.quantity),
+        // Keep unit price exactly as in PDF (17.09)
+        unitPrice: item.unitPrice,
+        // Keep total exactly as in PDF (256.35)
+        total: item.total,
         productId: item.productId
       })),
       status: "PENDING_REVIEW"
@@ -173,6 +171,7 @@ function calculateShippingFeePerItem(
   
   if (totalQuantity === 0) return 0;
   
+  // Keep full precision for accurate calculations
   return totalShippingFee / totalQuantity;
 }
 

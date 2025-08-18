@@ -196,6 +196,8 @@ export default function InvoiceReview() {
     { label: "ABC Distributors", value: "ABC Distributors" },
     { label: "Fresh Market Co", value: "Fresh Market Co" },
     { label: "Euro Beverages", value: "Euro Beverages" },
+    { label: "Swanson", value: "Swanson" },
+    { label: "Rabeko", value: "Rabeko" },
   ];
 
   const tableRows = editableItems.map((item, index) => [

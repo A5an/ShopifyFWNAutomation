@@ -6,6 +6,7 @@ async function main() {
   console.log("🌱 Starting database seed...");
 
   // Clean existing data
+  await prisma.job.deleteMany();
   await prisma.logEntry.deleteMany();
   await prisma.invoiceItem.deleteMany();
   await prisma.invoice.deleteMany();
@@ -21,27 +22,132 @@ async function main() {
   const suppliers = await Promise.all([
     prisma.supplier.create({
       data: {
+        name: "Addict",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
         name: "Bolero",
       },
     }),
     prisma.supplier.create({
       data: {
-        name: "XYZ Foods",
+        name: "Buchteiner",
       },
     }),
     prisma.supplier.create({
       data: {
-        name: "ABC Distributors",
+        name: "DSL Global",
       },
     }),
     prisma.supplier.create({
       data: {
-        name: "Fresh Market Co",
+        name: "Dynveo",
       },
     }),
     prisma.supplier.create({
       data: {
-        name: "Euro Beverages",
+        name: "Maiavie",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Ingredient Superfood",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Inlead",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Io genix",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Labz Nutrition",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Life pro",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Liot",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Max protein",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Nakosport",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Novoma",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Nutrimea",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Nutrimeo",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Ostrovit",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Pb Wholesale",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Powerbody",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Pro Supply",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Prolife",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Rabeko",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Shaker store",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Swanson",
+      },
+    }),
+    prisma.supplier.create({
+      data: {
+        name: "Yamamoto",
       },
     }),
   ]);
@@ -109,15 +215,29 @@ async function main() {
     prisma.supplierSKU.create({
       data: {
         productId: products[2].id, // Mineral Water
-        sku: "XYZ-WAT-500-001",
-        brand: "XYZ Foods",
+        sku: "SWA-WAT-500-001",
+        brand: "Swanson",
       },
     }),
     prisma.supplierSKU.create({
       data: {
         productId: products[3].id, // Energy Drink
-        sku: "ABC-ENG-ORIG-001",
-        brand: "ABC Distributors",
+        sku: "MAX-ENG-ORIG-001",
+        brand: "Max protein",
+      },
+    }),
+    prisma.supplierSKU.create({
+      data: {
+        productId: products[4].id, // Sparkling Water Lemon
+        sku: "DSL-SPARK-LEM-001",
+        brand: "DSL Global",
+      },
+    }),
+    prisma.supplierSKU.create({
+      data: {
+        productId: products[5].id, // Orange Juice 1L
+        sku: "NUT-JUICE-ORG-001",
+        brand: "Nutrimea",
       },
     }),
   ]);
