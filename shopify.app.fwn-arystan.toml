@@ -1,0 +1,28 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "63992ad3fea77fcdcbf464c5dd5b3b73"
+name = "FWN-Arystan"
+handle = "fwn-arystan"
+application_url = "https://distance-scan-breakdown-bloom.trycloudflare.com"
+embedded = true
+
+[build]
+include_config_on_deploy = true
+automatically_update_urls_on_dev = true
+
+[webhooks]
+api_version = "2025-07"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "write_products"
+
+[auth]
+redirect_urls = [
+  "https://distance-scan-breakdown-bloom.trycloudflare.com/auth/callback",
+  "https://distance-scan-breakdown-bloom.trycloudflare.com/auth/shopify/callback",
+  "https://distance-scan-breakdown-bloom.trycloudflare.com/api/auth/callback"
+]
+
+[pos]
+embedded = false
