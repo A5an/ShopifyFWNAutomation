@@ -21,7 +21,9 @@
     "vite": "vite",
     "test:pdf-js": "node test-parsing-integration.js",
     "test:pdf-python": "npx tsx test-python-integration.ts",
-    "test:addict": "npx tsx test-addict.ts"
+    "test:addict": "npx tsx test-addict.ts",
+    "test:bolero": "npx tsx test-bolero.ts",
+    "test:bolero:dump": "npx tsx test-bolero-dump.ts"
   },
   "type": "module",
   "engines": {

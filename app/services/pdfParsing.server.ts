@@ -1036,11 +1036,685 @@ class BoleroParser implements InvoiceParser {
       }>;
     }>,
   ): Promise<PdfExtractionResult> {
-    // TODO: Implement Bolero-specific parsing logic
+    try {
+      const result: ParsedInvoiceData = {
+        supplierInfo: {},
+        invoiceMetadata: { currency: "EUR", shippingFee: 0 },
+        lineItems: [],
+      };
+
+      // Detect header with: Description | Article code | Quantity | Unit price | Subtotal
+      const thresholds: { [key: string]: number } = {};
+      let headerY = -Infinity;
+      for (const line of textLines) {
+        const up = line.text.toLowerCase();
+        if (
+          up.includes("description") &&
+          (up.includes("article") || up.includes("code")) &&
+          (up.includes("quantity") || up.includes("qty")) &&
+          up.includes("unit price") &&
+          (up.includes("subtotal") ||
+            up.includes("sub total") ||
+            up.includes("sub-total") ||
+            up.includes("total"))
+        ) {
+          headerY = line.yPosition;
+          const items = [...line.items].sort((a, b) => a.x - b.x);
+          for (const el of items) {
+            const t = el.text.toLowerCase();
+            if (t.includes("article") && t.includes("code"))
+              thresholds.sku = el.x;
+            else if (t.includes("description")) thresholds.description = el.x;
+            else if (t.includes("quantity") || t === "qty")
+              thresholds.quantity = el.x;
+            else if (t.includes("unit") && t.includes("price"))
+              thresholds.unitPrice = el.x;
+            else if (
+              t.includes("subtotal") ||
+              t.includes("sub total") ||
+              t.includes("sub-total") ||
+              (t.includes("total") && !t.includes("unit"))
+            )
+              thresholds.total = el.x;
+          }
+          break;
+        }
+      }
+
+      if (headerY === -Infinity) {
+        // Fallback: infer column thresholds from data patterns
+        // Header not found; try to infer thresholds heuristically
+        (this as any)._inferBoleroThresholdsFromData?.(textLines, thresholds);
+        // Proceed even if some thresholds are missing; parseRow has fallbacks
+      }
+
+      const items: {
+        supplierSku: string;
+        description?: string;
+        quantity: number;
+        unitPrice: number;
+        total: number;
+      }[] = [];
+      let pendingDesc = "";
+      for (const line of textLines) {
+        if (line.yPosition <= headerY + 0.1) continue;
+
+        const contDesc = this.getContinuationDescription(
+          line.items,
+          thresholds,
+        );
+        let row = this.parseRow(line.items, thresholds);
+        if (!row) {
+          // Heuristic fallback when thresholds or header matching are imperfect
+          row = this.parseRowByHeuristics(line.items);
+        }
+        if (row) {
+          if (pendingDesc) {
+            row.description = `${pendingDesc} ${row.description || ""}`
+              .replace(/\s+/g, " ")
+              .trim();
+            pendingDesc = "";
+          }
+          if (typeof row.quantity === "number") {
+            const q = row.quantity;
+            row.description = (row.description || "")
+              .replace(new RegExp(`(?:^|\\s)${q}(?:\\.0+)?(?:\\s|$)`), " ")
+              .replace(/\s+/g, " ")
+              .trim();
+          }
+          // Keep Subtotal from PDF if present; otherwise compute
+          if (
+            row.total == null &&
+            typeof row.unitPrice === "number" &&
+            typeof row.quantity === "number"
+          ) {
+            row.total = Math.round(row.unitPrice * row.quantity * 100) / 100;
+          }
+          items.push(row);
+        } else if (contDesc) {
+          if (items.length) {
+            const last = items[items.length - 1];
+            last.description = `${last.description || ""} ${contDesc}`
+              .replace(/\s+/g, " ")
+              .trim();
+          } else {
+            pendingDesc = pendingDesc ? `${pendingDesc} ${contDesc}` : contDesc;
+          }
+        }
+      }
+
+      // Append service lines found anywhere (Payment costs, Shipping & handling)
+      this.appendServiceLines(textLines, items);
+
+      // If nothing parsed with per-line logic, try robust global row detection by prices
+      if (items.length === 0) {
+        const globalItems = this.parseByGlobalHeuristics(textLines);
+        items.push(...globalItems);
+      }
+
+      result.lineItems = items;
+      return {
+        success: true,
+        data: result,
+        warnings:
+          items.length === 0 ? ["No line items parsed for Bolero"] : undefined,
+      };
+    } catch (e) {
+      return {
+        success: false,
+        error: e instanceof Error ? e.message : "Bolero parsing failed",
+      };
+    }
+  }
+
+  private appendServiceLines(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{ x: number; y: number; text: string; fontSize?: number }>;
+    }>,
+    items: Array<{
+      supplierSku: string;
+      description?: string;
+      quantity: number;
+      unitPrice: number;
+      total: number;
+    }>,
+  ) {
+    const already = new Set(
+      items.map((i) => `${(i.description || "").toLowerCase()}|${i.total}`),
+    );
+    for (const line of textLines) {
+      const text = (line.text || "").toLowerCase();
+      const isPayment = text.includes("payment") && text.includes("cost");
+      const isShipping = text.includes("shipping") && text.includes("handl");
+      if (!isPayment && !isShipping) continue;
+      // Reconstruct prices from '€' token sequences on the same line
+      const els = [...line.items]
+        .map((e) => ({ x: e.x, text: (e.text || "").trim() }))
+        .filter((e) => e.text.length > 0)
+        .sort((a, b) => a.x - b.x);
+      const euroIdxs: number[] = [];
+      for (let i = 0; i < els.length; i++)
+        if (els[i].text === "€") euroIdxs.push(i);
+      const readAfterEuro = (idx: number): number | null => {
+        let s = "";
+        let j = idx + 1;
+        while (j < els.length && /[0-9.,]/.test(els[j].text)) {
+          s += els[j].text;
+          j++;
+        }
+        const v = this.parsePrice(s);
+        return v == null ? null : v;
+      };
+      const values = euroIdxs
+        .map(readAfterEuro)
+        .filter((v) => v != null) as number[];
+      if (values.length === 0) continue;
+      const unitPrice = values[0] ?? 0;
+      const total = values[values.length - 1] ?? unitPrice;
+      const description = isShipping ? "Shipping & handling" : "Payment costs";
+      const key = `${description.toLowerCase()}|${total}`;
+      if (already.has(key)) continue;
+      items.push({
+        supplierSku: "-",
+        description,
+        quantity: 1,
+        unitPrice,
+        total,
+      });
+      already.add(key);
+    }
+  }
+
+  private parseRow(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+    thresholds: { [key: string]: number },
+  ) {
+    const els = [...elements].sort((a, b) => a.x - b.x);
+    const getNear = (x?: number) =>
+      x == null
+        ? []
+        : els
+            .filter((e) => Math.abs(e.x - x) < 2.5)
+            .map((e) => e.text.trim())
+            .filter(Boolean);
+
+    // SKU
+    let sku = "";
+    for (const s of getNear(thresholds.sku)) {
+      const tl = s.toLowerCase();
+      if (
+        !tl.includes("description") &&
+        !tl.includes("unit") &&
+        !tl.includes("price") &&
+        !/^q\.?$/.test(tl)
+      ) {
+        sku = s;
+        break;
+      }
+    }
+    if (!sku) return null;
+
+    // Description between description and quantity columns
+    let description = "";
+    if (thresholds.description != null && thresholds.quantity != null) {
+      const desc = els
+        .filter(
+          (e) =>
+            e.x >= thresholds.description - 0.5 &&
+            e.x < thresholds.quantity - 0.5,
+        )
+        .map((e) => e.text.trim())
+        .filter((t) => {
+          if (!t) return false;
+          const tl = t.toLowerCase();
+          if (/^q\.?$/.test(tl)) return false;
+          if (tl.includes("unit") && tl.includes("price")) return false;
+          if (this.isPriceLike(t)) return false;
+          if (/^-?\d+(?:[.,]\d+)?$/.test(t)) return false;
+          return true;
+        });
+      description = desc.join(" ").replace(/\s+/g, " ").trim();
+    }
+
+    // Quantity
+    let quantity: number | null = null;
+    if (thresholds.quantity != null) {
+      for (const q of getNear(thresholds.quantity)) {
+        const n = this.parseNumber(q);
+        if (n != null) {
+          quantity = n;
+          break;
+        }
+      }
+    } else {
+      // Fallback: choose integer token nearest to unitPrice column and less than it
+      const unitX = thresholds.unitPrice ?? thresholds.total ?? null;
+      const intTokens = els
+        .map((e) => ({ x: e.x, t: e.text.trim() }))
+        .filter((e) => /^\d+$/.test(e.t));
+      if (intTokens.length) {
+        let best: { x: number; t: string } | null = null;
+        for (const tok of intTokens) {
+          if (unitX != null && tok.x >= unitX) continue; // must be left of price
+          if (!best) best = tok;
+          else if (unitX != null) {
+            if (Math.abs(tok.x - unitX) < Math.abs(best.x - unitX)) best = tok;
+          }
+        }
+        if (best) {
+          const n = this.parseNumber(best.t);
+          if (n != null) quantity = n;
+        }
+      }
+    }
+
+    // Prices
+    const unitPrice = this.parsePriceNearColumn(els, thresholds.unitPrice);
+    const total = this.parsePriceNearColumn(els, thresholds.total);
+    if (quantity == null || unitPrice == null || total == null) return null;
     return {
-      success: false,
-      error: "Bolero parser not yet implemented",
+      supplierSku: sku,
+      description: description || undefined,
+      quantity,
+      unitPrice,
+      total,
     };
+  }
+
+  private getContinuationDescription(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+    thresholds: { [key: string]: number },
+  ): string {
+    if (thresholds.description == null || thresholds.quantity == null)
+      return "";
+    const parts = elements
+      .filter(
+        (e) =>
+          e.x >= thresholds.description - 0.5 &&
+          e.x < thresholds.quantity - 0.5,
+      )
+      .map((e) => e.text.trim())
+      .filter(
+        (t) =>
+          t &&
+          !/^q\.?$/i.test(t) &&
+          !this.isPriceLike(t) &&
+          !/^-?\d+(?:[.,]\d+)?$/.test(t),
+      );
+    return parts.join(" ").replace(/\s+/g, " ").trim();
+  }
+
+  private parseByGlobalHeuristics(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{ x: number; y: number; text: string; fontSize?: number }>;
+    }>,
+  ): Array<{
+    supplierSku: string;
+    description?: string;
+    quantity: number;
+    unitPrice: number;
+    total: number;
+  }> {
+    const items: Array<{ x: number; y: number; text: string }> = [];
+    for (const line of textLines) {
+      for (const it of line.items) {
+        const t = it.text?.trim();
+        if (!t) continue;
+        items.push({ x: it.x, y: it.y, text: t });
+      }
+    }
+    // Group by row using Y tolerance
+    const tol = 0.5;
+    const rowsMap = new Map<
+      number,
+      Array<{ x: number; y: number; text: string }>
+    >();
+    for (const it of items) {
+      const key = Math.round(it.y / tol) * tol;
+      const row = rowsMap.get(key) || [];
+      row.push(it);
+      rowsMap.set(key, row);
+    }
+    const rowYs = [...rowsMap.keys()].sort((a, b) => a - b);
+    const results: Array<{
+      supplierSku: string;
+      description?: string;
+      quantity: number;
+      unitPrice: number;
+      total: number;
+    }> = [];
+    for (const y of rowYs) {
+      const row = rowsMap.get(y)!;
+      const els = row
+        .map((e) => ({ x: e.x, text: e.text.trim() }))
+        .filter((e) => e.text.length > 0)
+        .sort((a, b) => a.x - b.x);
+      if (!els.length) continue;
+      const compactRow = els
+        .map((e) => e.text)
+        .join("")
+        .toLowerCase();
+      if (
+        compactRow.includes("shipping") ||
+        compactRow.includes("handling") ||
+        compactRow.includes("payment")
+      ) {
+        // Defer service lines to appendServiceLines so they appear at the end
+        continue;
+      }
+      // Rebuild prices from '€' followed by number tokens (e.g., 3 , 2 4)
+      const euroIdxs: number[] = [];
+      for (let i = 0; i < els.length; i++)
+        if (els[i].text === "€") euroIdxs.push(i);
+      if (euroIdxs.length === 0) continue;
+      const parseEuroAt = (
+        idx: number,
+      ): { value: number | null; x: number } => {
+        let s = "";
+        let j = idx + 1;
+        while (j < els.length && /[0-9.,]/.test(els[j].text)) {
+          s += els[j].text;
+          j++;
+        }
+        return { value: this.parsePrice(s), x: els[idx].x };
+      };
+      const euroValues = euroIdxs
+        .map((i) => parseEuroAt(i))
+        .filter((e) => e.value != null) as Array<{ value: number; x: number }>;
+      if (euroValues.length === 0) continue;
+      const total = euroValues[euroValues.length - 1].value;
+      const unitPrice = euroValues[0].value;
+      const priceX = euroValues[0].x;
+
+      // Quantity: try rightmost integer left of price, else derive from total/unitPrice
+      const qtyCandidates = els.filter(
+        (e) => e.x < priceX && /^\d+$/.test(e.text),
+      );
+      let quantity: number | null = null;
+      if (qtyCandidates.length) {
+        const qtyTok = [...qtyCandidates].sort((a, b) => b.x - a.x)[0];
+        quantity = this.parseNumber(qtyTok.text);
+      }
+      if (
+        (quantity == null || quantity === 0) &&
+        unitPrice != null &&
+        total != null
+      ) {
+        const q = Math.round((total / unitPrice) * 100) / 100;
+        const qi = Math.round(q);
+        if (qi > 0 && Math.abs(q - qi) < 0.05) quantity = qi;
+      }
+      // Detect service lines (Shipping/Handling/Payment) and force quantity to 1 if missing
+      const rowText = els
+        .map((e) => e.text)
+        .join(" ")
+        .toLowerCase();
+      const isServiceLine =
+        compactRow.includes("shipping") ||
+        compactRow.includes("handling") ||
+        compactRow.includes("payment");
+      if (isServiceLine && (quantity == null || quantity === 0)) {
+        quantity = 1;
+      }
+      if (quantity == null || quantity === 0) continue;
+
+      // SKU (Article code): tokens of digits and dots between last 'L' before price and first '€'
+      const firstEuroX = priceX;
+      let lastLIdx = -1;
+      for (let i = 0; i < els.length; i++)
+        if (els[i].text.toUpperCase() === "L" && els[i].x < firstEuroX)
+          lastLIdx = i;
+      const startIdx = lastLIdx >= 0 ? lastLIdx + 1 : 0;
+      const codeTokens = els.filter(
+        (e, idx) =>
+          idx >= startIdx && e.x < firstEuroX && /^[0-9.]$/.test(e.text),
+      );
+      let sku = codeTokens
+        .map((t) => t.text)
+        .join("")
+        .replace(/\.{2,}/g, ".")
+        .replace(/^\./, "")
+        .replace(/\.$/, "");
+      if (!sku && isServiceLine) {
+        sku = "-";
+      }
+      if (!sku) continue;
+
+      // Description: rebuild as "Name | 9g | 1,5L"
+      const pipeIdxs: number[] = [];
+      for (let i = 0; i < els.length; i++) {
+        if (els[i].text === "|" && els[i].x < firstEuroX) pipeIdxs.push(i);
+      }
+      const nameEndIdx =
+        pipeIdxs.length > 0
+          ? pipeIdxs[0]
+          : lastLIdx >= 0
+            ? lastLIdx + 1
+            : Math.max(0, startIdx);
+      const nameTokens = els.slice(0, Math.max(0, nameEndIdx));
+
+      const buildName = (tokens: Array<{ x: number; text: string }>) => {
+        let out = "";
+        for (const tk of tokens) {
+          const raw = tk.text;
+          // Insert a space if token carried space visually
+          if (out && /\s/.test(raw) && out[out.length - 1] !== " ") out += " ";
+          const letters = raw.replace(/[^A-Za-z]/g, "");
+          for (const ch of letters) {
+            const last = out[out.length - 1] || "";
+            if (out && /[a-z]/.test(last) && /[A-Z]/.test(ch)) out += " ";
+            out += ch;
+          }
+        }
+        return out.replace(/\s+/g, " ").trim();
+      };
+
+      const buildCompact = (tokens: Array<{ x: number; text: string }>) => {
+        const s = tokens
+          .map((t) => t.text)
+          .filter((t) => /^[0-9A-Za-z,]$/.test(t))
+          .join("");
+        return s;
+      };
+
+      const namePart = isServiceLine
+        ? compactRow.includes("shipping")
+          ? "Shipping & handling"
+          : compactRow.includes("payment")
+            ? "Payment costs"
+            : buildName(nameTokens)
+        : buildName(nameTokens);
+      let size1 = "";
+      let size2 = "";
+      if (pipeIdxs.length >= 1) {
+        const a = pipeIdxs[0];
+        const b = pipeIdxs.length >= 2 ? pipeIdxs[1] : -1;
+        if (a >= 0)
+          size1 = buildCompact(
+            els.slice(a + 1, b >= 0 ? b : lastLIdx >= 0 ? lastLIdx + 1 : a + 1),
+          );
+        if (b >= 0)
+          size2 = buildCompact(
+            els.slice(b + 1, lastLIdx >= 0 ? lastLIdx + 1 : b + 1),
+          );
+      }
+      const description = [
+        namePart,
+        !isServiceLine && size1 && `| ${size1}`,
+        !isServiceLine && size2 && `| ${size2}`,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      results.push({
+        supplierSku: sku,
+        description: description || undefined,
+        quantity,
+        unitPrice: unitPrice ?? 0,
+        total,
+      });
+    }
+    return results;
+  }
+  private parseRowByHeuristics(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+  ) {
+    const els = elements
+      .map((e) => ({ x: e.x, text: e.text.trim() }))
+      .filter((e) => e.text.length > 0)
+      .sort((a, b) => a.x - b.x);
+    if (els.length === 0) return null;
+
+    // Service line detection (e.g., Shipping & handling, Payment costs)
+    const compactRow = els
+      .map((e) => e.text)
+      .join("")
+      .toLowerCase();
+    if (
+      compactRow.includes("shipping") ||
+      compactRow.includes("handling") ||
+      compactRow.includes("payment")
+    ) {
+      // Defer service lines to appendServiceLines so they appear at the end
+      return null;
+    }
+
+    // Identify price-like tokens
+    const prices = els.filter((e) => this.isPriceLike(e.text));
+    if (prices.length === 0) return null;
+    const totalTok = prices[prices.length - 1];
+    const unitTok = prices.length >= 2 ? prices[prices.length - 2] : null;
+    const total = this.parsePrice(totalTok.text);
+    const unitPrice = unitTok ? this.parsePrice(unitTok.text) : null;
+
+    // Quantity: rightmost integer token to the left of the leftmost price
+    const priceX = unitTok ? Math.min(unitTok.x, totalTok.x) : totalTok.x;
+    const qtyTokens = els.filter((e) => e.x < priceX && /^\d+$/.test(e.text));
+    let quantity: number | null = null;
+    if (qtyTokens.length) {
+      const rightmost = [...qtyTokens].sort((a, b) => b.x - a.x)[0];
+      const n = this.parseNumber(rightmost.text);
+      if (n != null) quantity = n;
+    }
+    if (quantity == null) return null;
+
+    // SKU: pick first clean token on the left area
+    const skuArea = els.filter((e) => e.x < (qtyTokens[0]?.x ?? priceX));
+    let sku = "";
+    for (const t of skuArea) {
+      if (/^[A-Za-z0-9_.\-]+$/.test(t.text)) {
+        sku = t.text;
+        break;
+      }
+    }
+    if (!sku) return null;
+
+    // Description: tokens between sku and quantity, excluding numeric/price terms
+    const skuX = skuArea.find((e) => e.text === sku)?.x ?? skuArea[0]?.x ?? 0;
+    const qtyX = qtyTokens[0]?.x ?? priceX;
+    const descParts = els
+      .filter((e) => e.x > skuX && e.x < qtyX)
+      .map((e) => e.text)
+      .filter((t) => {
+        const tl = t.toLowerCase();
+        if (this.isPriceLike(t)) return false;
+        if (/^-?\d+(?:[.,]\d+)?$/.test(t)) return false;
+        if (/^q\.?$/.test(tl)) return false;
+        if (tl.includes("unit") && tl.includes("price")) return false;
+        return true;
+      });
+    let description = descParts.join(" ").replace(/\s+/g, " ").trim();
+    description = description
+      .replace(new RegExp(`(?:^|\\s)${quantity}(?:\\.0+)?(?:\\s|$)`), " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    return {
+      supplierSku: sku,
+      description: description || undefined,
+      quantity,
+      unitPrice: unitPrice ?? 0,
+      total,
+    };
+  }
+  private parsePriceNearColumn(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+    xThreshold?: number,
+  ): number | null {
+    if (xThreshold == null) return null;
+    const window = 3.5;
+    const within = elements
+      .filter((e) => Math.abs(e.x - xThreshold) < window)
+      .sort((a, b) => a.x - b.x)
+      .map((e) => ({ x: e.x, text: e.text.trim() }))
+      .filter((e) => e.text.length > 0);
+    if (!within.length) return null;
+    type Cand = { x: number; text: string };
+    const cands: Cand[] = [];
+    for (const t of within) if (this.isPriceLike(t.text)) cands.push(t);
+    for (let i = 0; i < within.length - 1; i++) {
+      const merged = `${within[i].text}${within[i + 1].text}`;
+      if (this.isPriceLike(merged))
+        cands.push({ x: (within[i].x + within[i + 1].x) / 2, text: merged });
+    }
+    if (cands.length) {
+      const best = cands.reduce(
+        (b, cur) =>
+          Math.abs(cur.x - xThreshold) < Math.abs(b.x - xThreshold) ? cur : b,
+        cands[0],
+      );
+      const v = this.parsePrice(best.text);
+      if (v || v === 0) return v;
+    }
+    for (const t of within) {
+      const v = this.parsePrice(t.text);
+      if (v || v === 0) return v;
+    }
+    const all = within.map((t) => t.text).join("");
+    if (this.isPriceLike(all)) {
+      const v = this.parsePrice(all);
+      if (v || v === 0) return v;
+    }
+    return null;
+  }
+
+  private parseNumber(text: string): number | null {
+    const t = text.replace(/\s/g, "").replace(",", ".");
+    const n = parseFloat(t);
+    return isNaN(n) ? null : n;
+  }
+  private isPriceLike(text: string): boolean {
+    if (!text) return false;
+    const t = text.trim();
+    return (
+      /^-?\d{1,3}(?:[\s.,]\d{3})*[.,]\d{2,}$/.test(t) ||
+      /^-?\d+[.,]\d{2,}$/.test(t)
+    );
+  }
+  private parsePrice(text: string): number {
+    let s = text.trim();
+    if (!s) return 0;
+    s = s.replace(/[€$£%]/g, "").replace(/\s+/g, "");
+    const neg = s.startsWith("-");
+    if (neg) s = s.substring(1);
+    const m = s.match(/(.*?)[.,](\d{2})$/);
+    if (!m) {
+      const d = s.replace(/[^0-9]/g, "");
+      if (!d) return 0;
+      const cents = parseInt(d, 10) * 100;
+      return (neg ? -cents : cents) / 100;
+    }
+    const intPart = (m[1] || "").replace(/[.,]/g, "");
+    const dec = m[2];
+    if (!/^[0-9]+$/.test(intPart) || !/^[0-9]{2}$/.test(dec)) return 0;
+    let cents = parseInt(intPart, 10) * 100 + parseInt(dec, 10);
+    if (neg) cents = -cents;
+    return cents / 100;
   }
 }
 
@@ -1505,5 +2179,66 @@ class AddictParser implements InvoiceParser {
     const withSpaces = /^-?\d{1,3}(?:[\s.,]\d{3})*[.,]\d{2,}$/.test(t);
     const simple = /^-?\d+[.,]\d{2,}$/.test(t);
     return withSpaces || simple;
+  }
+
+  // Heuristic inference for Bolero when header not matched
+  // Exposed with a name that's robust to minification when called via any
+  private _inferBoleroThresholdsFromData(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{ x: number; y: number; text: string; fontSize?: number }>;
+    }>,
+    thresholds: { [key: string]: number },
+  ) {
+    // Scan lines and pick the rightmost two price-like X as unitPrice and total; leftmost integer as quantity; earliest text as description
+    const priceXs: number[] = [];
+    for (const line of textLines) {
+      const prices = line.items
+        .map((it) => ({ x: it.x, t: it.text.trim() }))
+        .filter((it) => this.isPriceLike(it.t))
+        .sort((a, b) => a.x - b.x);
+      if (prices.length >= 2) {
+        // Accumulate typical positions
+        priceXs.push(prices[prices.length - 2].x); // candidate unit price
+        priceXs.push(prices[prices.length - 1].x); // candidate total
+      }
+    }
+    if (priceXs.length >= 2) {
+      // Use median-ish by sorting
+      priceXs.sort((a, b) => a - b);
+      const mid = Math.floor(priceXs.length / 2);
+      thresholds.unitPrice = priceXs[mid - 1] ?? priceXs[0];
+      thresholds.total = priceXs[mid] ?? priceXs[priceXs.length - 1];
+    }
+    // Quantity: try to find a common integer X to the left of unit price
+    if (thresholds.unitPrice != null) {
+      const qtyXs: number[] = [];
+      for (const line of textLines) {
+        const ints = line.items
+          .filter((it) => it.x < thresholds.unitPrice!)
+          .map((it) => it.text.trim())
+          .filter((t) => /^\d+$/.test(t));
+        if (ints.length > 0) {
+          // Take the rightmost integer before unit price as likely quantity
+          const rightmost = line.items
+            .filter(
+              (it) =>
+                /^\d+$/.test(it.text.trim()) && it.x < thresholds.unitPrice!,
+            )
+            .sort((a, b) => b.x - a.x)[0];
+          if (rightmost) qtyXs.push(rightmost.x);
+        }
+      }
+      if (qtyXs.length) {
+        qtyXs.sort((a, b) => a - b);
+        thresholds.quantity = qtyXs[Math.floor(qtyXs.length / 2)];
+      }
+    }
+    // Description: choose a common left-side block
+    if (thresholds.quantity != null) {
+      thresholds.description =
+        thresholds.description ?? thresholds.quantity - 10;
+    }
   }
 }
