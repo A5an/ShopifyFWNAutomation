@@ -154,13 +154,21 @@ def find_invoice_tables(pdf_path: str) -> Dict[str, Any]:
             # Heuristics to identify invoice tables:
             # 1. Should have at least 3 columns (SKU, Description, Quantity, Price)
             # 2. Should have reasonable number of rows (1-100 line items)
-            # 3. Should contain typical invoice keywords
+            # 3. Should contain typical invoice keywords (English and French)
             
             if table["shape"][1] >= 3 and 1 <= table["shape"][0] <= 100:
                 # Check headers for invoice-related terms
                 headers = [str(h).lower() for h in table["headers"]]
-                invoice_keywords = ["item", "sku", "product", "description", "qty", "quantity", 
-                                  "price", "amount", "total", "unit"]
+                invoice_keywords = [
+                    # English
+                    "item", "sku", "product", "description", "qty", "quantity", "price", "amount", "total", "unit",
+                    # French (Addict invoices)
+                    "libell",      # matches "libellé" or "libelle"
+                    "réf", "ref", # reference/code
+                    "quantité", "qté", "qte", "q.",
+                    "pu",          # prix unitaire
+                    "prix ht", "montant ht", "total ht", "ht"
+                ]
                 
                 # Count how many invoice keywords are in headers
                 keyword_matches = sum(1 for keyword in invoice_keywords if 

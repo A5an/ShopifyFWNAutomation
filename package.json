@@ -20,7 +20,8 @@
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
     "test:pdf-js": "node test-parsing-integration.js",
-    "test:pdf-python": "npx tsx test-python-integration.ts"
+    "test:pdf-python": "npx tsx test-python-integration.ts",
+    "test:addict": "npx tsx test-addict.ts"
   },
   "type": "module",
   "engines": {

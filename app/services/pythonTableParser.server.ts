@@ -126,6 +126,12 @@ export class PythonTableParser {
       String(header).toLowerCase().includes('exp. date') || 
       String(header).toLowerCase().includes('unit price')
     );
+
+    // Check if this is an Addict-like French table
+    const isAddictTable = headers.some(header => {
+      const h = String(header).toLowerCase();
+      return h.includes('libell') || h.includes('prix ht') || h === 'pu' || h === 'q.';
+    });
     
     // Process each row
     for (let i = 0; i < dataRows.length; i++) {
@@ -146,6 +152,12 @@ export class PythonTableParser {
       // Parse row for line item data
       const lineItem = this.parseRow(row, columnMap, isSwansonTable);
       if (lineItem) {
+        // For Addict tables, ensure numbers are normalized and compute total if missing
+        if (isAddictTable) {
+          if (typeof lineItem.unitPrice === 'number' && typeof lineItem.quantity === 'number') {
+            lineItem.total = Math.round(lineItem.unitPrice * lineItem.quantity * 100) / 100;
+          }
+        }
         lineItems.push(lineItem);
       }
     }
@@ -390,15 +402,41 @@ export class PythonTableParser {
     if (headers.length > 0) {
       headers.forEach((header, index) => {
         const normalized = String(header).toLowerCase();
-        if (normalized.includes('item') || normalized.includes('sku') || normalized.includes('code')) {
+        // French variants for Addict invoices: Libellé (description), Q. (quantity), PU (unit price), Prix HT (total)
+        if (
+          normalized.includes('item') ||
+          normalized.includes('sku') ||
+          normalized.includes('code') ||
+          normalized.includes('réf') || // Réf. / reference
+          normalized.includes('ref')
+        ) {
           columnMap.sku = index;
-        } else if (normalized.includes('description') || normalized.includes('product') || normalized.includes('name')) {
+        } else if (
+          normalized.includes('description') ||
+          normalized.includes('libell') || // Libellé
+          normalized.includes('product') ||
+          normalized.includes('name')
+        ) {
           columnMap.description = index;
-        } else if (normalized.includes('qty') || normalized.includes('quantity')) {
+        } else if (
+          normalized.includes('qty') ||
+          normalized.includes('quantity') ||
+          normalized === 'q.' ||
+          normalized.startsWith('q ')
+        ) {
           columnMap.quantity = index;
-        } else if ((normalized.includes('unit') && normalized.includes('price')) || normalized.includes('unit price')) {
+        } else if (
+          (normalized.includes('unit') && normalized.includes('price')) ||
+          normalized.includes('unit price') ||
+          normalized === 'pu' // Prix unitaire
+        ) {
           columnMap.unitPrice = index;
-        } else if (normalized.includes('amount') || normalized.includes('total')) {
+        } else if (
+          normalized.includes('amount') ||
+          normalized.includes('total') ||
+          normalized.includes('prix ht') || // Prix HT column
+          normalized.includes('montant ht')
+        ) {
           columnMap.total = index;
         } else if (normalized.includes('exp') && normalized.includes('date')) {
           columnMap.expDate = index;
@@ -444,9 +482,15 @@ export class PythonTableParser {
         columnMap.sku = col;
         continue;
       }
+      // Generic code-like pattern (alphanumeric without spaces, not purely numeric)
+      const genericCodeMatches = values.filter(val => /^[A-Za-z0-9\-_.]{3,}$/.test(val) && !/^\d+$/.test(val));
+      if (!columnMap.sku && genericCodeMatches.length >= values.length * 0.6) {
+        columnMap.sku = col;
+        continue;
+      }
       
       // Check for quantity patterns (numbers)
-      const qtyMatches = values.filter(val => /^\d+$/.test(val));
+      const qtyMatches = values.filter(val => /^\d+(?:[.,]\d+)?$/.test(val));
       if (qtyMatches.length >= values.length * 0.8) { // 80% match
         columnMap.quantity = col;
         continue;
@@ -492,10 +536,10 @@ export class PythonTableParser {
     try {
       const lineItem: any = {};
       
-      // Extract SKU
+      // Extract SKU: if a SKU column is identified, accept any non-empty string (to support suppliers like Addict)
       if (columnMap.sku !== undefined && row[columnMap.sku]) {
         const skuValue = String(row[columnMap.sku]).trim();
-        if (/^(IAF|FITT|YAM|SW)[A-Z0-9]*\d+/.test(skuValue)) {
+        if (skuValue) {
           lineItem.supplierSku = skuValue;
         }
       }
@@ -508,8 +552,11 @@ export class PythonTableParser {
       // Extract quantity
       if (columnMap.quantity !== undefined && row[columnMap.quantity]) {
         const qtyValue = String(row[columnMap.quantity]).trim();
-        const qty = parseInt(qtyValue, 10);
+        // Support European formats and decimals by normalizing separators
+        const normalizedQty = qtyValue.replace(/\s/g, '').replace(',', '.');
+        const qty = parseFloat(normalizedQty);
         if (!isNaN(qty)) {
+          // Quantities are usually integers; if decimal, keep as number
           lineItem.quantity = qty;
         }
       }
