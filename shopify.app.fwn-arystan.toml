@@ -3,7 +3,7 @@
 client_id = "63992ad3fea77fcdcbf464c5dd5b3b73"
 name = "FWN-Arystan"
 handle = "fwn-arystan"
-application_url = "https://instruments-throat-ties-documentary.trycloudflare.com"
+application_url = "https://guides-rates-feed-creations.trycloudflare.com"
 embedded = true
 
 [build]
@@ -19,9 +19,9 @@ scopes = "write_products"
 
 [auth]
 redirect_urls = [
-  "https://instruments-throat-ties-documentary.trycloudflare.com/auth/callback",
-  "https://instruments-throat-ties-documentary.trycloudflare.com/auth/shopify/callback",
-  "https://instruments-throat-ties-documentary.trycloudflare.com/api/auth/callback"
+  "https://guides-rates-feed-creations.trycloudflare.com/auth/callback",
+  "https://guides-rates-feed-creations.trycloudflare.com/auth/shopify/callback",
+  "https://guides-rates-feed-creations.trycloudflare.com/api/auth/callback"
 ]
 
 [pos]

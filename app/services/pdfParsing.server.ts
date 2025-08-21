@@ -1149,8 +1149,11 @@ class BoleroParser implements InvoiceParser {
         items.push(...globalItems);
       }
 
-      // Append shipping line last (if present)
-      this.appendServiceLines(textLines, items);
+      // Extract shipping cost into metadata (do not add as line item)
+      const shipping = this.extractShippingAmount(textLines);
+      if (shipping != null) {
+        result.invoiceMetadata.shippingFee = shipping;
+      }
 
       result.lineItems = items;
       return {
@@ -1236,6 +1239,62 @@ class BoleroParser implements InvoiceParser {
         already.add(key);
       }
     }
+  }
+
+  private extractShippingAmount(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{ x: number; y: number; text: string; fontSize?: number }>;
+    }>,
+  ): number | null {
+    // Find a line that contains Shipping & handling (compact tokens) and read rightmost € value as total
+    for (const line of textLines) {
+      const compact = line.items
+        .map((e) => (e.text || "").trim())
+        .join("")
+        .toLowerCase();
+      if (!(compact.includes("shipping") && compact.includes("handl")))
+        continue;
+      const els = [...line.items]
+        .map((e) => ({ x: e.x, text: (e.text || "").trim() }))
+        .filter((e) => e.text.length > 0)
+        .sort((a, b) => a.x - b.x);
+      const euroIdxs: number[] = [];
+      for (let i = 0; i < els.length; i++)
+        if (els[i].text === "€") euroIdxs.push(i);
+      if (euroIdxs.length === 0) return 0;
+      const readValueAfterEuro = (
+        idx: number,
+      ): { value: number | null; x: number } => {
+        let s = "";
+        let j = idx + 1;
+        let seenSep = false;
+        let decimals = 0;
+        while (j < els.length && /[0-9.,]/.test(els[j].text)) {
+          const ch = els[j].text;
+          s += ch;
+          if (ch === "," || ch === ".") {
+            seenSep = true;
+            decimals = 0;
+          } else if (seenSep && /\d/.test(ch)) {
+            decimals += 1;
+            if (decimals >= 2) break;
+          }
+          j++;
+        }
+        const v = this.parsePrice(s);
+        return { value: v == null ? null : v, x: els[idx].x };
+      };
+      const vals = euroIdxs
+        .map((i) => readValueAfterEuro(i))
+        .filter((e) => e.value != null) as Array<{ value: number; x: number }>;
+      if (!vals.length) return 0;
+      // Rightmost price is the Subtotal
+      const total = vals.reduce((p, c) => (c.x > p.x ? c : p)).value;
+      return total;
+    }
+    return null;
   }
 
   private parseRow(
