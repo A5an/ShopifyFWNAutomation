@@ -1143,14 +1143,14 @@ class BoleroParser implements InvoiceParser {
         }
       }
 
-      // Append service lines found anywhere (Payment costs, Shipping & handling)
-      this.appendServiceLines(textLines, items);
-
       // If nothing parsed with per-line logic, try robust global row detection by prices
       if (items.length === 0) {
         const globalItems = this.parseByGlobalHeuristics(textLines);
         items.push(...globalItems);
       }
+
+      // Append shipping line last (if present)
+      this.appendServiceLines(textLines, items);
 
       result.lineItems = items;
       return {
@@ -1184,11 +1184,16 @@ class BoleroParser implements InvoiceParser {
     const already = new Set(
       items.map((i) => `${(i.description || "").toLowerCase()}|${i.total}`),
     );
+    // Collect shipping line (only) and append it last
+    let shippingCandidate: { unitPrice: number; total: number } | null = null;
     for (const line of textLines) {
-      const text = (line.text || "").toLowerCase();
-      const isPayment = text.includes("payment") && text.includes("cost");
-      const isShipping = text.includes("shipping") && text.includes("handl");
-      if (!isPayment && !isShipping) continue;
+      const compact = line.items
+        .map((e) => (e.text || "").trim())
+        .join("")
+        .toLowerCase();
+      const isShipping =
+        compact.includes("shipping") && compact.includes("handl");
+      if (!isShipping) continue;
       // Reconstruct prices from '€' token sequences on the same line
       const els = [...line.items]
         .map((e) => ({ x: e.x, text: (e.text || "").trim() }))
@@ -1210,20 +1215,26 @@ class BoleroParser implements InvoiceParser {
       const values = euroIdxs
         .map(readAfterEuro)
         .filter((v) => v != null) as number[];
-      if (values.length === 0) continue;
+      if (values.length === 0) {
+        shippingCandidate = { unitPrice: 0, total: 0 };
+        continue;
+      }
       const unitPrice = values[0] ?? 0;
       const total = values[values.length - 1] ?? unitPrice;
-      const description = isShipping ? "Shipping & handling" : "Payment costs";
-      const key = `${description.toLowerCase()}|${total}`;
-      if (already.has(key)) continue;
-      items.push({
-        supplierSku: "-",
-        description,
-        quantity: 1,
-        unitPrice,
-        total,
-      });
-      already.add(key);
+      shippingCandidate = { unitPrice, total };
+    }
+    if (shippingCandidate) {
+      const key = `shipping & handling|${shippingCandidate.total}`;
+      if (!already.has(key)) {
+        items.push({
+          supplierSku: "-",
+          description: "Shipping & handling",
+          quantity: 1,
+          unitPrice: shippingCandidate.unitPrice,
+          total: shippingCandidate.total,
+        });
+        already.add(key);
+      }
     }
   }
 
