@@ -247,6 +247,10 @@ function selectParser(supplierName: string): InvoiceParser {
     return new SwansonParser();
   }
 
+  if (normalizedName.includes("maiavie")) {
+    return new MaiavieParser();
+  }
+
   if (normalizedName.includes("addict")) {
     return new AddictParser();
   }
@@ -1839,6 +1843,1018 @@ class GenericParser implements InvoiceParser {
           error instanceof Error ? error.message : "Generic parsing failed",
       };
     }
+  }
+}
+
+// Maiavie (Dolibarr, FR) invoice parser
+class MaiavieParser implements InvoiceParser {
+  async parse(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{
+        x: number;
+        y: number;
+        text: string;
+        fontSize?: number;
+      }>;
+    }>,
+  ): Promise<PdfExtractionResult> {
+    try {
+      const result: ParsedInvoiceData = {
+        supplierInfo: {},
+        invoiceMetadata: {
+          currency: "EUR",
+          shippingFee: 0,
+        },
+        lineItems: [],
+      };
+
+      // Detect table header and approximate column thresholds
+      const thresholds: { [key: string]: number } = {};
+      let headerY = -Infinity;
+      for (const line of textLines) {
+        const up = line.text.toUpperCase();
+        // Dolibarr FR/EN header variants
+        const looksLikeHeader =
+          ((up.includes("DÉSIGNATION") ||
+            up.includes("DESIGNATION") ||
+            up.includes("LIBELL") ||
+            up.includes("LIBELLÉ") ||
+            up.includes("LABEL") ||
+            up.includes("DESCRIPTION")) &&
+            (up.includes("PU") || up.includes("UNIT") || up.includes("P.U")) &&
+            (up.includes("PRIX HT") ||
+              up.includes("MONTANT HT") ||
+              up.includes("TOTAL HT") ||
+              up.includes("AMOUNT") ||
+              up.includes("TOTAL"))) ||
+          // Sometimes headers are split; fallback if we see multiple typical header tokens
+          (up.includes("REF") &&
+            (up.includes("Q.") || up.includes("QTY")) &&
+            (up.includes("PU") || up.includes("UNIT")));
+        if (!looksLikeHeader) continue;
+
+        headerY = line.yPosition;
+        const items = [...line.items].sort((a, b) => a.x - b.x);
+        for (const el of items) {
+          const t = el.text.toLowerCase();
+          if (
+            t.includes("réf") ||
+            t === "ref" ||
+            t.includes("code") ||
+            t.includes("sku")
+          )
+            thresholds.sku = el.x;
+          else if (
+            t.includes("libell") ||
+            t.includes("label") ||
+            t.includes("description") ||
+            t.includes("désign") ||
+            t.includes("design")
+          )
+            thresholds.description = el.x;
+          else if (
+            t === "q." ||
+            t.startsWith("q ") ||
+            t.includes("quant") ||
+            t.includes("qty") ||
+            t.includes("qt") ||
+            t.includes("qte") ||
+            t.includes("qté")
+          )
+            thresholds.quantity = el.x;
+          else if (
+            t === "pu" ||
+            (t.includes("unit") && t.includes("price")) ||
+            t.includes("p.u")
+          )
+            thresholds.unitPrice = el.x;
+          else if (
+            t.includes("prix ht") ||
+            t.includes("montant ht") ||
+            t.includes("total") ||
+            t.includes("amount")
+          )
+            thresholds.total = el.x;
+        }
+        break;
+      }
+
+      // Try strict header-based continuation parsing
+      const parsed = this.parseDolibarrByHeaderContinuations(
+        textLines,
+        thresholds,
+        headerY,
+      );
+      if (parsed.length > 0) {
+        result.lineItems = parsed;
+      } else {
+        // Fallbacks
+        const alt = this.parseDolibarrHyphenStreaming(textLines, headerY);
+        if (alt.length > 0) {
+          result.lineItems = alt;
+        } else {
+          result.lineItems = this.parseDolibarrHyphenForward(
+            textLines,
+            headerY,
+          );
+        }
+      }
+      return {
+        success: true,
+        data: result,
+        warnings:
+          (result.lineItems?.length ?? 0) === 0
+            ? ["No line items parsed for Maiavie"]
+            : undefined,
+      };
+    } catch (e) {
+      return {
+        success: false,
+        error: e instanceof Error ? e.message : "Maiavie parsing failed",
+      };
+    }
+  }
+
+  private parseDolibarrByHeaderContinuations(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{ x: number; y: number; text: string; fontSize?: number }>;
+    }>,
+    thresholds: { [key: string]: number },
+    headerY: number,
+  ): Array<{
+    supplierSku: string;
+    description?: string;
+    quantity: number;
+    unitPrice: number;
+    total: number;
+  }> {
+    if (
+      thresholds.description == null ||
+      thresholds.unitPrice == null ||
+      thresholds.total == null
+    )
+      return [];
+    const out: Array<{
+      supplierSku: string;
+      description?: string;
+      quantity: number;
+      unitPrice: number;
+      total: number;
+    }> = [];
+
+    let current: {
+      sku: string;
+      descParts: string[];
+      qty?: number;
+      unit?: number;
+      tot?: number;
+    } | null = null;
+
+    const isFooter = (s: string) =>
+      /total ht|total ttc|tva|net|règlement|reglement/i.test(s);
+
+    for (const line of textLines) {
+      if (line.yPosition <= headerY + 0.1) continue;
+      const up = (line.text || "").toUpperCase();
+      if (isFooter(up)) break;
+
+      const els = [...line.items]
+        .map((e) => ({ x: e.x, text: (e.text || "").trim() }))
+        .filter((e) => e.text.length > 0)
+        .sort((a, b) => a.x - b.x);
+      if (!els.length) continue;
+
+      const near = (x?: number, w = 2.5) =>
+        x == null
+          ? []
+          : els.filter((e) => Math.abs(e.x - x) < w).map((e) => e.text);
+
+      const unitHere = near(thresholds.unitPrice).find((t) =>
+        this.isPriceLike(t),
+      );
+      const qtyHere = near(thresholds.quantity).find((t) => /^\d+$/.test(t));
+      const totalHere = near(thresholds.total).find((t) => this.isPriceLike(t));
+      const isPriceRow = !!unitHere && !!totalHere;
+
+      if (isPriceRow) {
+        // Flush previous
+        if (
+          current &&
+          current.qty != null &&
+          current.unit != null &&
+          current.tot != null
+        ) {
+          out.push({
+            supplierSku: current.sku,
+            description:
+              current.descParts.join(" ").replace(/\s+/g, " ").trim() ||
+              undefined,
+            quantity: current.qty,
+            unitPrice: current.unit,
+            total: current.tot,
+          });
+        }
+
+        // Parse first token as "SKU - Desc"
+        const left = els[0]?.text || "";
+        let sku = "-";
+        let firstDesc = "";
+        const dash = left.indexOf("-");
+        if (dash > 0) {
+          sku = left.substring(0, dash).trim();
+          firstDesc = left.substring(dash + 1).trim();
+        } else {
+          sku = left.trim();
+        }
+        const unit = this.parsePrice(unitHere!);
+        let tot = this.parsePrice(totalHere!);
+        if (tot == null) {
+          const rm = this.extractRightmostPriceFromLine(line.items);
+          if (rm != null) tot = rm;
+        }
+        let qty = qtyHere
+          ? (this.parseNumber(qtyHere) ?? undefined)
+          : undefined;
+        if (
+          (qty == null || qty === 0) &&
+          unit != null &&
+          tot != null &&
+          unit !== 0
+        ) {
+          const q = Math.round((tot / unit) * 100) / 100;
+          const qi = Math.round(q);
+          if (qi > 0 && Math.abs(q - qi) < 0.05) qty = qi;
+        }
+        if (qty == null || qty === 0) qty = 1;
+
+        current = {
+          sku,
+          descParts: firstDesc ? [firstDesc] : [],
+          qty,
+          unit: unit ?? undefined,
+          tot: tot ?? undefined,
+        };
+        continue;
+      }
+
+      // Not a price row: if only left-column content, treat as continuation description
+      if (current) {
+        const rightTouched = els.some(
+          (e) =>
+            (thresholds.unitPrice != null &&
+              e.x >= thresholds.unitPrice - 1.0) ||
+            (thresholds.quantity != null && e.x >= thresholds.quantity - 1.0) ||
+            (thresholds.total != null && e.x >= thresholds.total - 1.0),
+        );
+        if (!rightTouched) {
+          const extra = this.collectPlainText(line.items);
+          if (extra) current.descParts.push(extra);
+        }
+      }
+    }
+
+    // Flush last
+    if (
+      current &&
+      current.qty != null &&
+      current.unit != null &&
+      current.tot != null
+    ) {
+      out.push({
+        supplierSku: current.sku,
+        description:
+          current.descParts.join(" ").replace(/\s+/g, " ").trim() || undefined,
+        quantity: current.qty,
+        unitPrice: current.unit,
+        total: current.tot,
+      });
+    }
+    return out;
+  }
+  // Dolibarr forward scan: find "SKU - Desc" line, then scan forward for the first price row
+  private parseDolibarrHyphenForward(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{ x: number; y: number; text: string; fontSize?: number }>;
+    }>,
+    headerY: number,
+  ): Array<{
+    supplierSku: string;
+    description?: string;
+    quantity: number;
+    unitPrice: number;
+    total: number;
+  }> {
+    const lines = textLines
+      .filter((l) => l.yPosition > headerY + 0.1)
+      .map((l) => ({
+        items: [...l.items].sort((a, b) => a.x - b.x),
+        text: [...l.items]
+          .sort((a, b) => a.x - b.x)
+          .map((e) => (e.text || "").trim())
+          .filter(Boolean)
+          .join(" "),
+      }));
+    const isMeta = (t: string) =>
+      /\btva\b/i.test(t) || /\bvat\b/i.test(t) || /%/.test(t);
+    const out: Array<{
+      supplierSku: string;
+      description?: string;
+      quantity: number;
+      unitPrice: number;
+      total: number;
+    }> = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const t = lines[i].text.trim();
+      if (!t || isMeta(t)) continue;
+      const m = t.match(/^\s*([A-Za-z0-9]+)\s*[-–—]\s*(.+)$/);
+      if (!m) continue;
+      const sku = m[1].trim();
+      const descParts: string[] = [m[2].trim()];
+      // accumulate description lines until price row
+      let unit: number | null = null;
+      let tot: number | null = null;
+      let qty: number | null = null;
+      let j = i + 1;
+      for (; j < lines.length; j++) {
+        const tj = lines[j].text.trim();
+        if (!tj) continue;
+        if (isMeta(tj)) continue;
+        const prices = this.extractPricesWithX(lines[j].items);
+        if (prices.length === 0) {
+          const extra = this.collectPlainText(lines[j].items);
+          if (extra) descParts.push(extra);
+          continue;
+        }
+        // price row
+        const right = prices.reduce((b, c) => (c.x > b.x ? c : b));
+        tot = right.val;
+        const lefts = prices.filter((p) => p.x < right.x);
+        if (lefts.length)
+          unit = lefts.reduce((b, c) => (c.x > b.x ? c : b)).val;
+        if (unit == null && prices.length >= 2) unit = prices[0].val;
+        const firstPriceX = prices.map((p) => p.x).sort((a, b) => a - b)[0];
+        qty = this.extractRightmostIntegerLeftOf(lines[j].items, firstPriceX);
+        if ((qty == null || qty === 0) && unit && tot && unit !== 0) {
+          const q = Math.round((tot / unit) * 100) / 100;
+          const qi = Math.round(q);
+          if (qi > 0 && Math.abs(q - qi) < 0.05) qty = qi;
+        }
+        if (qty == null || qty === 0) qty = 1;
+        break;
+      }
+      if (unit != null && tot != null && qty != null) {
+        const description = descParts.join(" ").replace(/\s+/g, " ").trim();
+        out.push({
+          supplierSku: sku || "-",
+          description: description || undefined,
+          quantity: qty,
+          unitPrice: unit,
+          total: tot,
+        });
+        i = j; // jump past price row
+      }
+    }
+    return out;
+  }
+
+  // Dolibarr: rows start with "SKU - Description" followed by a price row with Qte / PU / Montant HT
+  private parseDolibarrHyphenStreaming(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{ x: number; y: number; text: string; fontSize?: number }>;
+    }>,
+    headerY: number,
+  ): Array<{
+    supplierSku: string;
+    description?: string;
+    quantity: number;
+    unitPrice: number;
+    total: number;
+  }> {
+    const lines = textLines
+      .filter((l) => l.yPosition > headerY + 0.1)
+      .map((l) => ({
+        items: [...l.items].sort((a, b) => a.x - b.x),
+        text: [...l.items]
+          .sort((a, b) => a.x - b.x)
+          .map((e) => (e.text || "").trim())
+          .filter(Boolean)
+          .join(" "),
+      }));
+    const results: Array<{
+      supplierSku: string;
+      description?: string;
+      quantity: number;
+      unitPrice: number;
+      total: number;
+    }> = [];
+
+    const isMeta = (t: string) =>
+      /\btva\b/i.test(t) || /\bvat\b/i.test(t) || /%/.test(t);
+
+    // Price-anchored scan: each price row forms an item; look upwards for "SKU - desc" and collect interim description lines
+    for (let j = 0; j < lines.length; j++) {
+      const prices = this.extractPricesWithX(lines[j].items);
+      if (prices.length === 0) continue;
+      const right = prices.reduce((b, c) => (c.x > b.x ? c : b));
+      let tot: number | null = right.val;
+      let unit: number | null = null;
+      const lefts = prices.filter((p) => p.x < right.x);
+      if (lefts.length) unit = lefts.reduce((b, c) => (c.x > b.x ? c : b)).val;
+      if (unit == null && prices.length >= 2) unit = prices[0].val;
+      const firstPriceX = prices.map((p) => p.x).sort((a, b) => a - b)[0];
+      let qty = this.extractRightmostIntegerLeftOf(lines[j].items, firstPriceX);
+      let sku: string | null = null;
+      const descParts: string[] = [];
+      const backLimit = Math.max(0, j - 12);
+      for (let i = j - 1; i >= backLimit; i--) {
+        const t = lines[i].text.trim();
+        if (!t) continue;
+        if (isMeta(t)) continue;
+        const toks = lines[i].items
+          .map((e) => (e.text || "").trim())
+          .filter(Boolean);
+        const di = toks.findIndex((s) => s === "-" || s === "–" || s === "—");
+        if (di > 0) {
+          let skuTok = "";
+          for (let k = di - 1; k >= 0; k--) {
+            const s = toks[k];
+            const sl = s.toLowerCase();
+            if (/^réf\.?$/i.test(sl) || /^ref\.?$/i.test(sl)) continue;
+            if (/^[A-Za-z0-9]+$/.test(s)) {
+              skuTok = s;
+              break;
+            }
+          }
+          if (skuTok) {
+            sku = skuTok;
+            const after =
+              di + 1 < toks.length
+                ? toks
+                    .slice(di + 1)
+                    .join(" ")
+                    .trim()
+                : "";
+            if (after) descParts.unshift(after);
+            for (let k = i + 1; k < j; k++) {
+              const extra = this.collectPlainText(lines[k].items);
+              if (extra) descParts.push(extra);
+            }
+            break;
+          }
+        } else {
+          const exPrices = this.extractPricesWithX(lines[i].items);
+          if (exPrices.length === 0) {
+            const extra = this.collectPlainText(lines[i].items);
+            if (extra) descParts.unshift(extra);
+          }
+        }
+      }
+      // If not found above, look below the price row for hyphenized title and description fragments
+      if (!sku) {
+        const fwdLimit = Math.min(lines.length - 1, j + 8);
+        let foundAt = -1;
+        for (let i = j + 1; i <= fwdLimit; i++) {
+          const t = lines[i].text.trim();
+          if (!t) continue;
+          if (isMeta(t)) continue;
+          const toks = lines[i].items
+            .map((e) => (e.text || "").trim())
+            .filter(Boolean);
+          const di = toks.findIndex((s) => s === "-" || s === "–" || s === "—");
+          if (di > 0) {
+            let skuTok = "";
+            for (let k = di - 1; k >= 0; k--) {
+              const s = toks[k];
+              const sl = s.toLowerCase();
+              if (/^réf\.?$/i.test(sl) || /^ref\.?$/i.test(sl)) continue;
+              if (/^[A-Za-z0-9]+$/.test(s)) {
+                skuTok = s;
+                break;
+              }
+            }
+            if (skuTok) {
+              sku = skuTok;
+              const after =
+                di + 1 < toks.length
+                  ? toks
+                      .slice(di + 1)
+                      .join(" ")
+                      .trim()
+                  : "";
+              if (after) descParts.push(after);
+              foundAt = i;
+              break;
+            }
+          }
+        }
+        if (foundAt !== -1) {
+          for (
+            let k = foundAt + 1;
+            k < Math.min(lines.length, foundAt + 6);
+            k++
+          ) {
+            const extraPrices = this.extractPricesWithX(lines[k].items);
+            if (extraPrices.length) break; // next item starts
+            const extra = this.collectPlainText(lines[k].items);
+            if (extra) descParts.push(extra);
+          }
+        }
+      }
+      if (!sku) continue;
+      if ((qty == null || qty === 0) && unit && tot && unit !== 0) {
+        const q = Math.round((tot / unit) * 100) / 100;
+        const qi = Math.round(q);
+        if (qi > 0 && Math.abs(q - qi) < 0.05) qty = qi;
+      }
+      if (qty == null || qty === 0) qty = 1;
+      const description = descParts.join(" ").replace(/\s+/g, " ").trim();
+      results.push({
+        supplierSku: sku,
+        description: description || undefined,
+        quantity: qty,
+        unitPrice: unit ?? 0,
+        total: tot ?? 0,
+      });
+    }
+    return results;
+  }
+
+  private collectPlainText(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+  ): string {
+    return [...elements]
+      .sort((a, b) => a.x - b.x)
+      .map((e) => (e.text || "").trim())
+      .filter((t) => {
+        if (!t) return false;
+        const tl = t.toLowerCase();
+        if (/^\d+(?:[.,]\d+)?%$/.test(t.replace(/\s+/g, ""))) return false;
+        if (this.isPriceLike(t)) return false;
+        if (/^-?\d+(?:[.,]\d+)?$/.test(t)) return false;
+        if (tl === "pu" || tl === "q." || /\bqty?\b/i.test(tl)) return false;
+        return true;
+      })
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  private extractPricesWithX(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+  ): Array<{ x: number; val: number }> {
+    const toks = [...elements]
+      .sort((a, b) => a.x - b.x)
+      .map((e) => ({ x: e.x, t: (e.text || "").trim() }))
+      .filter((e) => e.t.length > 0);
+    const groups: Array<{ x: number; text: string }> = [];
+    let cur = "";
+    let startX = 0;
+    let prevX = Number.NEGATIVE_INFINITY;
+    const isFrag = (s: string) => /^[0-9]+$/.test(s) || /^[.,]$/.test(s);
+    for (const tok of toks) {
+      const s = tok.t;
+      if (isFrag(s)) {
+        if (cur && tok.x - prevX > 1.2) {
+          groups.push({ x: startX, text: cur });
+          cur = "";
+        }
+        if (!cur) startX = tok.x;
+        cur += s;
+        prevX = tok.x;
+      } else if (this.isPriceLike(s)) {
+        groups.push({ x: tok.x, text: s });
+        cur = "";
+        prevX = Number.NEGATIVE_INFINITY;
+      } else {
+        if (cur) {
+          groups.push({ x: startX, text: cur });
+          cur = "";
+        }
+        prevX = Number.NEGATIVE_INFINITY;
+      }
+    }
+    if (cur) groups.push({ x: startX, text: cur });
+    const out: Array<{ x: number; val: number }> = [];
+    for (const g of groups) {
+      const v = this.parsePrice(g.text);
+      if (v != null) out.push({ x: g.x, val: v });
+    }
+    return out;
+  }
+
+  private extractRightmostIntegerLeftOf(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+    limitX: number,
+  ): number | null {
+    const toks = [...elements]
+      .sort((a, b) => a.x - b.x)
+      .map((e) => ({ x: e.x, t: (e.text || "").trim() }))
+      .filter((e) => e.t.length > 0 && e.x < limitX);
+    const ints = toks.filter((e) => /^\d+$/.test(e.t));
+    if (!ints.length) return null;
+    const right = ints.reduce((b, c) => (c.x > b.x ? c : b));
+    const n = parseInt(right.t, 10);
+    return isNaN(n) ? null : n;
+  }
+
+  private extractRightmostPriceFromLine(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+  ): number | null {
+    // Build a space-joined line of tokens, then find the rightmost price like 7 390,39 or 7390,39 or 7,390.39
+    const lineText = elements
+      .map((e) => (e.text || "").trim())
+      .filter((t) => t.length > 0)
+      .join(" ");
+    // Match prices with optional thousand groups separated by spaces, commas or periods
+    const regex = /(\d{1,3}(?:[\s.,]\d{3})*[.,]\d{2})/g;
+    let match: RegExpExecArray | null;
+    let last: string | null = null;
+    while ((match = regex.exec(lineText)) !== null) {
+      last = match[1];
+    }
+    if (!last) return null;
+    // Normalize by removing spaces then parse
+    const normalized = last.replace(/\s+/g, "");
+    return this.parsePrice(normalized);
+  }
+
+  private collectDescriptionTokens(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+    thresholds: { [key: string]: number },
+  ): string[] {
+    if (thresholds.description == null) return [];
+    const left = thresholds.description - 0.5;
+    const right =
+      thresholds.quantity != null
+        ? thresholds.quantity - 0.5
+        : thresholds.unitPrice != null
+          ? thresholds.unitPrice - 0.5
+          : undefined;
+    const els = [...elements]
+      .sort((a, b) => a.x - b.x)
+      .map((e) => ({ x: e.x, text: (e.text || "").trim() }))
+      .filter((e) => e.text.length > 0);
+    const inRange = els.filter((e) => {
+      if (e.x < left) return false;
+      if (right != null && e.x >= right) return false;
+      return true;
+    });
+    const tokens = inRange
+      .map((e) => e.text)
+      .filter((t) => {
+        const tl = t.toLowerCase();
+        if (!t) return false;
+        if (/^q\.?$/.test(tl)) return false;
+        if (tl === "pu") return false;
+        if (/^\d+(?:[.,]\d+)?%$/.test(t.replace(/\s+/g, ""))) return false; // drop VAT % like 5,5%
+        if (/^-?\d+(?:[.,]\d+)?$/.test(t)) return false;
+        if (/^-?\d{1,3}(?:[\s.,]\d{3})*[.,]\d{2,}$/.test(t)) return false;
+        return true;
+      });
+    return tokens;
+  }
+
+  private parseRow(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+    thresholds: { [key: string]: number },
+  ) {
+    const els = [...elements].sort((a, b) => a.x - b.x);
+    const getNear = (target?: number) =>
+      target == null
+        ? undefined
+        : els
+            .filter((e) => Math.abs(e.x - target) < 2.5)
+            .map((e) => e.text.trim())
+            .filter(Boolean);
+
+    // SKU/code
+    let sku = "";
+    const skuCandidates = getNear(thresholds.sku) || [];
+    for (const s of skuCandidates) {
+      if (
+        s &&
+        !/libell/i.test(s) &&
+        !/^q\.?$/i.test(s) &&
+        s.toLowerCase() !== "pu"
+      ) {
+        sku = s;
+        break;
+      }
+    }
+    if (!sku) sku = "-";
+
+    // Description
+    let description = "";
+    if (thresholds.description != null && thresholds.quantity != null) {
+      const parts = els
+        .filter(
+          (e) =>
+            e.x >= thresholds.description - 0.5 &&
+            e.x < thresholds.quantity - 0.5,
+        )
+        .map((e) => e.text.trim())
+        .filter((t) => {
+          if (!t) return false;
+          const tl = t.toLowerCase();
+          if (/^q\.?$/i.test(tl)) return false;
+          if (tl === "pu") return false;
+          if (/^-?\d+(?:[.,]\d+)?$/.test(t)) return false;
+          if (this.isPriceLike(t)) return false;
+          return true;
+        });
+      description = parts.join(" ").replace(/\s+/g, " ").trim();
+    }
+
+    // Quantity
+    let quantity: number | null = null;
+    const qtyCands = getNear(thresholds.quantity) || [];
+    for (const q of qtyCands) {
+      const n = this.parseNumber(q);
+      if (n != null) {
+        quantity = n;
+        break;
+      }
+    }
+
+    // Prices
+    let unitPrice = this.parsePriceNearColumn(els, thresholds.unitPrice);
+    let total = this.parsePriceNearColumn(els, thresholds.total);
+    if ((unitPrice == null || total == null) && thresholds.quantity != null) {
+      const priceTokens = els
+        .filter((e) => e.x > thresholds.quantity!)
+        .map((e) => e.text.trim())
+        .filter((t) => this.isPriceLike(t));
+      if (unitPrice == null && priceTokens.length >= 1)
+        unitPrice = this.parsePrice(priceTokens[0]);
+      if (total == null && priceTokens.length >= 1)
+        total = this.parsePrice(priceTokens[priceTokens.length - 1]);
+    }
+
+    // Derive quantity from prices if missing; last resort assume 1
+    if (
+      (quantity == null || quantity === 0) &&
+      unitPrice != null &&
+      total != null &&
+      unitPrice !== 0
+    ) {
+      const q = Math.round((total / unitPrice) * 100) / 100;
+      const qi = Math.round(q);
+      if (qi > 0 && Math.abs(q - qi) < 0.05) quantity = qi;
+    }
+
+    if (unitPrice == null || total == null) return null;
+    if (quantity == null || quantity === 0) quantity = 1;
+
+    return {
+      supplierSku: sku,
+      description: description || undefined,
+      quantity,
+      unitPrice,
+      total,
+    };
+  }
+
+  private parseByGlobalHeuristics(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{ x: number; y: number; text: string; fontSize?: number }>;
+    }>,
+    headerY: number,
+  ): Array<{
+    supplierSku: string;
+    description?: string;
+    quantity: number;
+    unitPrice: number;
+    total: number;
+  }> {
+    const tol = 0.5;
+    const rowsMap = new Map<
+      number,
+      Array<{ x: number; y: number; text: string }>
+    >();
+    for (const line of textLines) {
+      if (headerY !== -Infinity && line.yPosition <= headerY + 0.1) continue;
+      const up = line.text.toUpperCase();
+      if (
+        up.includes("TOTAL HT") ||
+        up.includes("TOTAL TTC") ||
+        up.includes("TVA") ||
+        up.includes("NET") ||
+        up.includes("RÈGLEMENT") ||
+        up.includes("REGLEMENT")
+      ) {
+        continue;
+      }
+      for (const it of line.items) {
+        const t = (it.text || "").trim();
+        if (!t) continue;
+        const key = Math.round(it.y / tol) * tol;
+        const row = rowsMap.get(key) || [];
+        row.push({ x: it.x, y: it.y, text: t });
+        rowsMap.set(key, row);
+      }
+    }
+    const ys = [...rowsMap.keys()].sort((a, b) => a - b);
+    const results: Array<{
+      supplierSku: string;
+      description?: string;
+      quantity: number;
+      unitPrice: number;
+      total: number;
+    }> = [];
+    for (const y of ys) {
+      const row = (rowsMap.get(y) || [])
+        .map((e) => ({ x: e.x, text: e.text.trim() }))
+        .filter((e) => e.text.length > 0)
+        .sort((a, b) => a.x - b.x);
+      if (!row.length) continue;
+
+      // Price-like tokens (including merged neighbors)
+      type Tok = { x: number; text: string };
+      const priceCands: Tok[] = [];
+      for (const tok of row)
+        if (this.isPriceLike(tok.text)) priceCands.push(tok);
+      for (let i = 0; i < row.length - 1; i++) {
+        const merged = `${row[i].text}${row[i + 1].text}`;
+        if (this.isPriceLike(merged))
+          priceCands.push({ x: (row[i].x + row[i + 1].x) / 2, text: merged });
+      }
+      if (priceCands.length === 0) continue;
+      const unitPrice = this.parsePrice(priceCands[0].text);
+      const total = this.parsePrice(priceCands[priceCands.length - 1].text);
+      const priceX = priceCands[0].x;
+
+      // Quantity: rightmost integer left of first price; else derive; else 1
+      const intLeft = row.filter((e) => e.x < priceX && /^\d+$/.test(e.text));
+      let quantity: number | null = null;
+      if (intLeft.length) {
+        const rightmost = [...intLeft].sort((a, b) => b.x - a.x)[0];
+        quantity = this.parseNumber(rightmost.text);
+      }
+      if (
+        (quantity == null || quantity === 0) &&
+        unitPrice &&
+        total &&
+        unitPrice !== 0
+      ) {
+        const q = Math.round((total / unitPrice) * 100) / 100;
+        const qi = Math.round(q);
+        if (qi > 0 && Math.abs(q - qi) < 0.05) quantity = qi;
+      }
+      if (quantity == null || quantity === 0) quantity = 1;
+
+      // SKU: first clean token left of first price
+      let sku = "-";
+      const leftSide = row.filter((e) => e.x < priceX);
+      for (const t of leftSide) {
+        if (/^[A-Za-z0-9_.\-]+$/.test(t.text)) {
+          sku = t.text;
+          break;
+        }
+      }
+
+      // Description: between sku and price, excluding numbers/price markers
+      const skuX =
+        leftSide.find((e) => e.text === sku)?.x ?? leftSide[0]?.x ?? 0;
+      const descParts = row
+        .filter((e) => e.x > skuX && e.x < priceX)
+        .map((e) => e.text)
+        .filter((t) => {
+          const tl = t.toLowerCase();
+          if (this.isPriceLike(t)) return false;
+          if (/^-?\d+(?:[.,]\d+)?$/.test(t)) return false;
+          if (/^q\.?$/i.test(tl)) return false;
+          if (tl === "pu") return false;
+          return true;
+        });
+      const description = descParts.join(" ").replace(/\s+/g, " ").trim();
+
+      results.push({
+        supplierSku: sku,
+        description: description || undefined,
+        quantity,
+        unitPrice: unitPrice ?? 0,
+        total,
+      });
+    }
+    return results;
+  }
+
+  private getContinuationDescription(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+    thresholds: { [key: string]: number },
+  ): string {
+    if (thresholds.description == null || thresholds.quantity == null)
+      return "";
+    const texts = elements
+      .filter(
+        (e) =>
+          e.x >= thresholds.description - 0.5 &&
+          e.x < thresholds.quantity - 0.5,
+      )
+      .map((e) => e.text.trim())
+      .filter((t) => {
+        if (!t) return false;
+        const tl = t.toLowerCase();
+        if (/^q\.?$/i.test(tl)) return false;
+        if (tl === "pu") return false;
+        if (/^-?\d+(?:[.,]\d+)?$/.test(t)) return false;
+        if (/^-?\d{1,3}(?:[.,]\d{3})*[.,]\d{2,}$/.test(t)) return false;
+        return true;
+      });
+    return texts.join(" ").replace(/\s+/g, " ").trim();
+  }
+
+  private parsePriceNearColumn(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+    xThreshold?: number,
+  ): number | null {
+    if (xThreshold == null) return null;
+    const window = 3.5;
+    const within = elements
+      .filter((e) => Math.abs(e.x - xThreshold) < window)
+      .sort((a, b) => a.x - b.x)
+      .map((e) => ({ x: e.x, text: e.text.trim() }))
+      .filter((e) => e.text.length > 0);
+    if (within.length === 0) return null;
+
+    type Cand = { x: number; text: string };
+    const candidates: Cand[] = [];
+    for (const tok of within)
+      if (this.isPriceLike(tok.text)) candidates.push(tok);
+    for (let i = 0; i < within.length - 1; i++) {
+      const merged = `${within[i].text}${within[i + 1].text}`;
+      if (this.isPriceLike(merged))
+        candidates.push({
+          x: (within[i].x + within[i + 1].x) / 2,
+          text: merged,
+        });
+    }
+    if (candidates.length) {
+      const best = candidates.reduce(
+        (b, c) =>
+          Math.abs(c.x - xThreshold) < Math.abs(b.x - xThreshold) ? c : b,
+        candidates[0],
+      );
+      const v = this.parsePrice(best.text);
+      if (v || v === 0) return v;
+    }
+    for (const tok of within) {
+      const v = this.parsePrice(tok.text);
+      if (v || v === 0) return v;
+    }
+    const all = within.map((t) => t.text).join("");
+    if (this.isPriceLike(all)) {
+      const v = this.parsePrice(all);
+      if (v || v === 0) return v;
+    }
+    return null;
+  }
+
+  private parseNumber(text: string): number | null {
+    const t = text.replace(/\s/g, "").replace(",", ".");
+    const n = parseFloat(t);
+    return isNaN(n) ? null : n;
+  }
+
+  private parsePrice(priceText: string): number {
+    let s = priceText.trim();
+    if (!s) return 0;
+    s = s.replace(/[€$£%]/g, "").replace(/\s+/g, "");
+    const neg = s.startsWith("-");
+    if (neg) s = s.substring(1);
+    const m = s.match(/(.*?)[.,](\d{2})$/);
+    if (!m) {
+      const d = s.replace(/[^0-9]/g, "");
+      if (!d) return 0;
+      const cents = parseInt(d, 10) * 100;
+      return (neg ? -cents : cents) / 100;
+    }
+    const intPart = (m[1] || "").replace(/[.,]/g, "");
+    const dec = m[2];
+    if (!/^[0-9]+$/.test(intPart) || !/^[0-9]{2}$/.test(dec)) return 0;
+    let cents = parseInt(intPart, 10) * 100 + parseInt(dec, 10);
+    if (neg) cents = -cents;
+    return cents / 100;
+  }
+
+  private isPriceLike(text: string): boolean {
+    if (!text) return false;
+    const t = text.trim();
+    return (
+      /^-?\d{1,3}(?:[\s.,]\d{3})*[.,]\d{2,}$/.test(t) ||
+      /^-?\d+[.,]\d{2,}$/.test(t)
+    );
   }
 }
 

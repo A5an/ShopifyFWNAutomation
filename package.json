@@ -23,7 +23,9 @@
     "test:pdf-python": "npx tsx test-python-integration.ts",
     "test:addict": "npx tsx test-addict.ts",
     "test:bolero": "npx tsx test-bolero.ts",
-    "test:bolero:dump": "npx tsx test-bolero-dump.ts"
+    "test:bolero:dump": "npx tsx test-bolero-dump.ts",
+    "test:maiavie": "npx tsx test-maiavie.ts",
+    "dump:maiavie": "npx tsx dump-maiavie.ts"
   },
   "type": "module",
   "engines": {
