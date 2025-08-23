@@ -255,6 +255,13 @@ function selectParser(supplierName: string): InvoiceParser {
     return new AddictParser();
   }
 
+  if (
+    normalizedName.includes("ingredient superfood") ||
+    normalizedName.replace(/\s+/g, "").includes("ingredientsuperfood")
+  ) {
+    return new IngredientSuperfoodParser();
+  }
+
   // Default to generic parser
   return new GenericParser();
 }
@@ -3348,5 +3355,246 @@ class AddictParser implements InvoiceParser {
       thresholds.description =
         thresholds.description ?? thresholds.quantity - 10;
     }
+  }
+}
+
+// Ingredient Superfood (wkhtmltopdf) - start by dumping tokens; parsing to be added after inspection
+class IngredientSuperfoodParser implements InvoiceParser {
+  async parse(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{ x: number; y: number; text: string; fontSize?: number }>;
+    }>,
+  ): Promise<PdfExtractionResult> {
+    // Build a dev dump for inspection
+    const dump: string[] = [];
+    const lines = [...textLines].sort((a, b) => a.yPosition - b.yPosition);
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i];
+      const toks = [...ln.items]
+        .sort((a, b) => a.x - b.x)
+        .map((e) => `${e.x.toFixed(2)}:${(e.text || "").trim()}`)
+        .join(" | ");
+      dump.push(`[${i}] y=${ln.yPosition.toFixed(2)} :: ${ln.text}`);
+      dump.push(`    tokens: ${toks}`);
+    }
+
+    // Detect the header row (letters spaced): Désignation | Quantité | Prix unitaire | TVA | Montant HT
+    let headerY = -Infinity;
+    let xQty: number | undefined;
+    let xUnit: number | undefined;
+    let xVat: number | undefined;
+    let xTotal: number | undefined;
+    const fold = (s: string) =>
+      (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    for (const ln of lines) {
+      const norm = fold(ln.text || "")
+        .toUpperCase()
+        .replace(/\s+/g, "");
+      if (
+        norm.includes("DESIGNATION") &&
+        norm.includes("QUANTITE") &&
+        norm.includes("PRIXUNITAIRE") &&
+        norm.includes("MONTANTHT")
+      ) {
+        headerY = ln.yPosition;
+        // Use approximate X anchors derived from dump
+        xQty = 21.3;
+        xUnit = 25.6;
+        xVat = 28.3;
+        xTotal = 31.9;
+        break;
+      }
+    }
+
+    const result: ParsedInvoiceData = {
+      supplierInfo: {},
+      invoiceMetadata: { currency: "EUR", shippingFee: 0 },
+      lineItems: [],
+    };
+
+    if (headerY !== -Infinity) {
+      // Parse rows: any line after header with prices near total column is an item row
+      for (const ln of lines) {
+        if (ln.yPosition <= headerY + 0.1) continue;
+        const els = [...ln.items]
+          .map((e) => ({ x: e.x, text: (e.text || "").trim() }))
+          .filter((e) => e.text.length > 0)
+          .sort((a, b) => a.x - b.x);
+        if (!els.length) continue;
+
+        // Total near total column
+        let total = this.parsePriceNearX(els, xTotal, 3.5);
+        if (total == null && xTotal != null) {
+          // Fallback: read all numeric fragments to the right of total column start
+          const rightFrags = els
+            .filter((e) => e.x >= xTotal - 0.6)
+            .map((e) => e.text)
+            .join("");
+          const cleaned = rightFrags.replace(/[^0-9.,]/g, "");
+          if (this.isPriceLike(cleaned)) total = this.parsePrice(cleaned);
+        }
+        if (total == null) continue;
+        let unitPrice = this.parsePriceNearX(els, xUnit, 3.5);
+        if (unitPrice == null && xUnit != null) {
+          // widen a bit to capture all fragments
+          const window = 1.6;
+          const unitFrags = els
+            .filter((e) => Math.abs(e.x - xUnit) < window)
+            .map((e) => e.text)
+            .join("");
+          const cleaned = unitFrags.replace(/[^0-9.,]/g, "");
+          if (this.isPriceLike(cleaned)) unitPrice = this.parsePrice(cleaned);
+          // final fallback: stitch between unit and vat columns
+          if (unitPrice == null && xVat != null) {
+            const between = els
+              .filter((e) => e.x > xUnit - 0.8 && e.x < xVat - 0.5)
+              .map((e) => e.text)
+              .join("");
+            const bc = between.replace(/[^0-9.,]/g, "");
+            if (this.isPriceLike(bc)) unitPrice = this.parsePrice(bc);
+          }
+        }
+        let quantity = this.parseNumberNearX(els, xQty, 3.0);
+
+        // Description: reconstruct from token X distances (before Qty/Unit column)
+        const descRightX = xQty ?? xUnit ?? 999;
+        const description = this.buildDescriptionFromEls(
+          ln.items,
+          descRightX as number,
+        );
+
+        if (quantity == null || quantity === 0) {
+          if (unitPrice != null && total != null && unitPrice !== 0) {
+            const q = Math.round((total / unitPrice) * 100) / 100;
+            const qi = Math.round(q);
+            if (qi > 0 && Math.abs(q - qi) < 0.05) quantity = qi;
+          } else {
+            quantity = 1;
+          }
+        }
+
+        // Skip summary rows (Total HT/TVA/Total TTC)
+        const descCompact = description.toLowerCase().replace(/\s+/g, "");
+        const isSummary =
+          descCompact.startsWith("totalht") ||
+          descCompact.startsWith("tva") ||
+          descCompact.startsWith("totalttc");
+        if (!isSummary) {
+          result.lineItems.push({
+            supplierSku: "-",
+            description: description || undefined,
+            quantity: quantity ?? 1,
+            unitPrice: unitPrice ?? 0,
+            total: total,
+          });
+        }
+      }
+    }
+
+    return {
+      success: true,
+      data: result,
+      warnings: dump,
+    };
+  }
+
+  private isPriceLike(text: string): boolean {
+    const t = (text || "").trim();
+    return (
+      /^-?\d{1,3}(?:[\s.,]\d{3})*[.,]\d{2}$/.test(t) ||
+      /^-?\d+[.,]\d{2}$/.test(t)
+    );
+  }
+
+  private parsePrice(text: string): number | null {
+    if (!text) return null;
+    let s = text
+      .trim()
+      .replace(/[€$£%]/g, "")
+      .replace(/\s+/g, "");
+    const neg = s.startsWith("-");
+    if (neg) s = s.substring(1);
+    const m = s.match(/(.*?)[.,](\d{2})$/);
+    if (!m) return null;
+    const intPart = (m[1] || "").replace(/[.,]/g, "");
+    const dec = m[2];
+    if (!/^[0-9]+$/.test(intPart)) return null;
+    let cents = parseInt(intPart, 10) * 100 + parseInt(dec, 10);
+    if (neg) cents = -cents;
+    return cents / 100;
+  }
+
+  private parsePriceNearX(
+    els: Array<{ x: number; text: string }>,
+    x?: number,
+    window: number = 3.0,
+  ): number | null {
+    if (x == null) return null;
+    const within = els.filter((e) => Math.abs(e.x - x) < window);
+    if (!within.length) return null;
+    // prefer standalone
+    for (const e of within) {
+      if (this.isPriceLike(e.text)) return this.parsePrice(e.text);
+    }
+    // try merged neighbors
+    for (let i = 0; i < within.length - 1; i++) {
+      const merged = `${within[i].text}${within[i + 1].text}`;
+      if (this.isPriceLike(merged)) return this.parsePrice(merged);
+    }
+    // merge all within tokens
+    const allWithin = within.map((e) => e.text).join("");
+    if (this.isPriceLike(allWithin)) return this.parsePrice(allWithin);
+    // fallback: use rightmost price-like anywhere on the row
+    for (let i = els.length - 1; i >= 0; i--) {
+      if (this.isPriceLike(els[i].text)) return this.parsePrice(els[i].text);
+    }
+    return null;
+  }
+
+  private parseNumberNearX(
+    els: Array<{ x: number; text: string }>,
+    x?: number,
+    window: number = 2.5,
+  ): number | null {
+    if (x == null) return null;
+    const within = els.filter((e) => Math.abs(e.x - x) < window);
+    if (!within.length) return null;
+    // merge potential split like 100 , 00
+    const s = within.map((e) => e.text).join("");
+    const normalized = s.replace(/\s+/g, "").replace(/,/g, ".");
+    const n = parseFloat(normalized);
+    return isNaN(n) ? null : n;
+  }
+
+  private buildDescriptionFromEls(
+    elements: Array<{ x: number; y: number; text: string; fontSize?: number }>,
+    rightX: number,
+  ): string {
+    const toks = [...elements]
+      .map((e) => ({ x: e.x, t: (e.text || "").trim() }))
+      .filter((e) => e.t.length > 0 && e.x < rightX - 0.5)
+      .sort((a, b) => a.x - b.x);
+    if (!toks.length) return "";
+    let out = "";
+    let prevX = toks[0].x;
+    const gapForSpace = 0.35; // tuned for this PDF's letter spacing
+    for (let i = 0; i < toks.length; i++) {
+      const { x, t } = toks[i];
+      const low = t.toLowerCase();
+      if (low.replace(/\s+/g, "").startsWith("totalht")) break;
+      if (low.replace(/\s+/g, "").startsWith("tva")) break;
+      if (low.includes("totalttc")) break;
+      // add space when there is a noticeable gap between tokens
+      if (i > 0 && x - prevX > gapForSpace) out += " ";
+      out += t;
+      prevX = x;
+    }
+    // Normalize decimals and units like Kg
+    out = out.replace(/(\d)\s*,\s*(\d)/g, "$1,$2");
+    out = out.replace(/K\s*g/gi, "Kg");
+    // Collapse multiple spaces
+    return out.replace(/\s+/g, " ").trim();
   }
 }
