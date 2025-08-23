@@ -1950,6 +1950,28 @@ class AddictParser implements InvoiceParser {
 
         const row = this.parseRow(line.items, columnThresholds);
         if (row) {
+          // Treat shipping line (e.g., "PORT FRAIS DE PORT") as shipping fee, not a product item
+          const descLower = (row.description || "").toLowerCase();
+          const lineLower = line.text.toLowerCase();
+          const isShippingLine =
+            descLower.includes("frais de port") ||
+            descLower.includes("port frais de port") ||
+            lineLower.includes("frais de port") ||
+            lineLower.includes("livraison");
+          if (isShippingLine) {
+            const fee =
+              typeof row.total === "number" && row.total > 0
+                ? row.total
+                : typeof row.unitPrice === "number" && row.unitPrice > 0
+                  ? row.unitPrice
+                  : 0;
+            if (fee > 0) {
+              // Prefer the detected fee; do not duplicate as a line item
+              result.invoiceMetadata.shippingFee = fee;
+            }
+            continue;
+          }
+
           // Prepend any pending continuation captured from prior lines
           if (pendingDesc) {
             row.description = `${pendingDesc} ${row.description || ""}`
