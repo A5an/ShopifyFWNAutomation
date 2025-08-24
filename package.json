@@ -27,7 +27,11 @@
     "test:maiavie": "npx tsx test-maiavie.ts",
     "test:superfood": "npx tsx test-superfood.ts",
     "dump:superfood": "npx tsx dump-superfood.ts",
-    "dump:maiavie": "npx tsx dump-maiavie.ts"
+    "test:labz": "npx tsx test-labz.ts",
+    "dump:labz": "npx tsx dump-labz.ts",
+    "dump:maiavie": "npx tsx dump-maiavie.ts",
+    "test:liot": "npx tsx test-liot.ts",
+    "dump:liot": "npx tsx dump-liot.ts"
   },
   "type": "module",
   "engines": {

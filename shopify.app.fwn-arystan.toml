@@ -3,7 +3,7 @@
 client_id = "63992ad3fea77fcdcbf464c5dd5b3b73"
 name = "FWN-Arystan"
 handle = "fwn-arystan"
-application_url = "https://wages-richard-philips-besides.trycloudflare.com"
+application_url = "https://webster-grants-insertion-weddings.trycloudflare.com"
 embedded = true
 
 [build]
@@ -19,9 +19,9 @@ scopes = "write_products"
 
 [auth]
 redirect_urls = [
-  "https://wages-richard-philips-besides.trycloudflare.com/auth/callback",
-  "https://wages-richard-philips-besides.trycloudflare.com/auth/shopify/callback",
-  "https://wages-richard-philips-besides.trycloudflare.com/api/auth/callback"
+  "https://webster-grants-insertion-weddings.trycloudflare.com/auth/callback",
+  "https://webster-grants-insertion-weddings.trycloudflare.com/auth/shopify/callback",
+  "https://webster-grants-insertion-weddings.trycloudflare.com/api/auth/callback"
 ]
 
 [pos]

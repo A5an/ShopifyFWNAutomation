@@ -262,6 +262,17 @@ function selectParser(supplierName: string): InvoiceParser {
     return new IngredientSuperfoodParser();
   }
 
+  if (
+    normalizedName.includes("labz nutrition") ||
+    normalizedName.includes("labznutrition")
+  ) {
+    return new LabzNutritionParser();
+  }
+
+  if (normalizedName.includes("liot")) {
+    return new LiotParser();
+  }
+
   // Default to generic parser
   return new GenericParser();
 }
@@ -3388,6 +3399,11 @@ class IngredientSuperfoodParser implements InvoiceParser {
     let xTotal: number | undefined;
     const fold = (s: string) =>
       (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const compactLetters = (s: string) =>
+      fold(s)
+        .toLowerCase()
+        .replace(/\s+/g, "")
+        .replace(/[^a-z0-9]/g, "");
     for (const ln of lines) {
       const norm = fold(ln.text || "")
         .toUpperCase()
@@ -3412,6 +3428,33 @@ class IngredientSuperfoodParser implements InvoiceParser {
       supplierInfo: {},
       invoiceMetadata: { currency: "EUR", shippingFee: 0 },
       lineItems: [],
+    };
+
+    // Helpers (declare before use)
+    // fold is already declared earlier in this scope; reuse the existing one
+    const getSortedTokens = (ln: (typeof lines)[number]) =>
+      [...ln.items]
+        .map((it) => ({ x: it.x, t: (it.text || "").trim() }))
+        .filter((it) => it.t.length > 0)
+        .sort((a, b) => a.x - b.x);
+    const parseMonetaryFromEuroAt = (
+      toks: { x: number; t: string }[],
+      euroIdx: number,
+    ): number | null => {
+      let s = "";
+      for (let i = euroIdx; i < toks.length; i++) {
+        const tt = toks[i].t;
+        if (i > euroIdx && tt.includes("€")) break;
+        if (tt === "€" || /[0-9]/.test(tt) || tt === "." || tt === ",") s += tt;
+        else break;
+      }
+      const cleaned = s.replace(/[^0-9.,]/g, "");
+      const m = cleaned.match(/(.*?)[.,](\d{2})$/);
+      if (!m) return null;
+      const intPart = (m[1] || "").replace(/[.,]/g, "");
+      const dec = m[2];
+      if (!/^[0-9]+$/.test(intPart)) return null;
+      return (parseInt(intPart, 10) * 100 + parseInt(dec, 10)) / 100;
     };
 
     if (headerY !== -Infinity) {
@@ -3596,5 +3639,524 @@ class IngredientSuperfoodParser implements InvoiceParser {
     out = out.replace(/K\s*g/gi, "Kg");
     // Collapse multiple spaces
     return out.replace(/\s+/g, " ").trim();
+  }
+}
+
+// Labz Nutrition - start with dump; parsing to be implemented after inspection
+class LabzNutritionParser implements InvoiceParser {
+  async parse(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{ x: number; y: number; text: string; fontSize?: number }>;
+    }>,
+  ): Promise<PdfExtractionResult> {
+    const lines = [...textLines].sort((a, b) => a.yPosition - b.yPosition);
+    const result: ParsedInvoiceData = {
+      supplierInfo: {},
+      invoiceMetadata: { currency: "EUR", shippingFee: 0 },
+      lineItems: [],
+    };
+
+    // Find header line (Articles Quantité Prix Remise Impôt Montant de la taxe Total)
+    const fold = (s: string) =>
+      (s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    let headerIndex = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const norm = fold(lines[i].text || "")
+        .toLowerCase()
+        .replace(/\s+/g, "")
+        .replace(/[^a-z0-9]/g, "");
+      if (
+        norm.includes("articles") &&
+        norm.includes("quantite") &&
+        norm.includes("prix") &&
+        norm.includes("total")
+      ) {
+        headerIndex = i;
+        break;
+      }
+    }
+    let lastSku: string | null = null;
+    let lastSkuIndex: number | null = null;
+
+    // Token utilities
+    const getSortedTokens = (ln: (typeof lines)[number]) =>
+      [...ln.items]
+        .map((it) => ({ x: it.x, t: (it.text || "").trim() }))
+        .filter((it) => it.t.length > 0)
+        .sort((a, b) => a.x - b.x);
+
+    // Collapse a description line to readable string by X gaps
+    const collapseLine = (
+      ln: (typeof lines)[number],
+      rightStopX?: number,
+    ): string => {
+      const toks = getSortedTokens(ln);
+      let out = "";
+      if (!toks.length) return out;
+      let prevX = toks[0].x;
+      const gapForSpace = 0.65;
+      for (let i = 0; i < toks.length; i++) {
+        const { x, t } = toks[i];
+        if (rightStopX != null && x >= rightStopX - 0.5) break;
+        const noSpaceBefore = /^(,|\.|:|;|%|€|!|\)|\]|\}|-|®)$/;
+        const noSpaceAfterPrev = /(^-|\(|\[|\{)$/;
+        if (i > 0 && x - prevX > gapForSpace) out += " ";
+        if (noSpaceBefore.test(t) && out.endsWith(" ")) out = out.slice(0, -1);
+        if (noSpaceAfterPrev.test(out[out.length - 1] || ""))
+          if (out.endsWith(" ")) out = out.slice(0, -1);
+        out += t;
+        prevX = x;
+      }
+      out = out.replace(/K\s?g/gi, "Kg");
+      out = out.replace(/\s+-\s+/g, "-");
+      return out.trim();
+    };
+
+    const parseMonetaryFromEuroAt = (
+      toks: { x: number; t: string }[],
+      euroIdx: number,
+    ): number | null => {
+      let s = "";
+      for (let i = euroIdx; i < toks.length; i++) {
+        const tt = toks[i].t;
+        if (i > euroIdx && tt.includes("€")) break; // stop at next euro
+        if (tt === "€" || /[0-9]/.test(tt) || tt === "." || tt === ",") {
+          s += tt;
+          continue;
+        }
+        break;
+      }
+      const cleaned = s.replace(/[^0-9.,]/g, "");
+      const m = cleaned.match(/(.*?)[.,](\d{2})$/);
+      if (!m) return null;
+      const intPart = (m[1] || "").replace(/[.,]/g, "");
+      const dec = m[2];
+      if (!/^[0-9]+$/.test(intPart)) return null;
+      return (parseInt(intPart, 10) * 100 + parseInt(dec, 10)) / 100;
+    };
+
+    const groupDigitRunsBeforeX = (
+      toks: { x: number; t: string }[],
+      xMax: number,
+    ) => {
+      const nums = toks.filter((tk) => tk.x < xMax && /^[0-9]$/.test(tk.t));
+      const groups: {
+        text: string;
+        startX: number;
+        endX: number;
+        midX: number;
+      }[] = [];
+      let current: { text: string; startX: number; endX: number } | null = null;
+      let lastX = -Infinity;
+      for (const n of nums) {
+        if (current && n.x - lastX <= 0.6) {
+          current.text += n.t;
+          current.endX = n.x;
+        } else {
+          if (current)
+            groups.push({
+              ...current,
+              midX: (current.startX + current.endX) / 2,
+            });
+          current = { text: n.t, startX: n.x, endX: n.x };
+        }
+        lastX = n.x;
+      }
+      if (current)
+        groups.push({ ...current, midX: (current.startX + current.endX) / 2 });
+      return groups;
+    };
+
+    const detectInlineSkuFromTokens = (
+      toks: { x: number; t: string }[],
+    ): string | null => {
+      for (let i = 0; i < toks.length; i++) {
+        if (toks[i].t !== ":") continue;
+        const before = toks
+          .slice(Math.max(0, i - 3), i)
+          .map((z) => z.t.toUpperCase())
+          .join("");
+        if (before.endsWith("SKU")) {
+          let sku = "";
+          let lastX = toks[i].x;
+          for (let j = i + 1; j < toks.length; j++) {
+            const tj = toks[j];
+            if (tj.x - lastX > 1.2 && sku.length > 0) break;
+            if (/^[0-9]$/.test(tj.t)) sku += tj.t;
+            else if (sku.length > 0) break;
+            lastX = tj.x;
+          }
+          return sku || null;
+        }
+      }
+      return null;
+    };
+
+    // Iterate over lines after header
+    for (
+      let i = headerIndex >= 0 ? headerIndex + 1 : 0;
+      i < lines.length;
+      i++
+    ) {
+      const ln = lines[i];
+      const textCompact = fold(ln.text || "")
+        .toLowerCase()
+        .replace(/\s+/g, "")
+        .replace(/[^a-z0-9]/g, "");
+      // Capture SKU when present on its own line
+      if (
+        fold(ln.text || "")
+          .toLowerCase()
+          .includes("sku:")
+      ) {
+        const m = (ln.text || "").match(/SKU\s*:?\s*([0-9]+)/i);
+        if (m) {
+          lastSku = m[1];
+          lastSkuIndex = i;
+        }
+      }
+      // Numeric row: must have at least one euro and not be a summary line
+      const toks = getSortedTokens(ln);
+      const euroIdxs = toks
+        .map((tk, idx) => ({ idx, t: tk.t }))
+        .filter((p) => p.t.includes("€"))
+        .map((p) => p.idx);
+      if (euroIdxs.length >= 1) {
+        const isSummary = /total|remise|livraison|sommefinale|impot|paye/i.test(
+          fold(ln.text || "").toLowerCase(),
+        );
+        if (isSummary) continue;
+
+        // Determine SKU from inline, recent previous two lines, or next two lines
+        let inlineSkuTok = detectInlineSkuFromTokens(toks);
+        let prevSku: string | null = null;
+        if (!inlineSkuTok) {
+          for (let k = 1; k <= 2 && i - k >= 0; k++) {
+            const tb = getSortedTokens(lines[i - k]);
+            const s = detectInlineSkuFromTokens(tb);
+            if (s) {
+              prevSku = s;
+              break;
+            }
+          }
+        }
+        let nextSku: string | null = null;
+        if (!inlineSkuTok && !prevSku) {
+          for (let k = 1; k <= 2 && i + k < lines.length; k++) {
+            const ta = getSortedTokens(lines[i + k]);
+            const s = detectInlineSkuFromTokens(ta);
+            if (s) {
+              nextSku = s;
+              break;
+            }
+          }
+        }
+
+        const unitPrice = parseMonetaryFromEuroAt(toks, euroIdxs[0]) ?? 0;
+        const totalPrice =
+          parseMonetaryFromEuroAt(toks, euroIdxs[euroIdxs.length - 1]) ?? 0;
+
+        // Quantity: require at least one integer group before first euro
+        const firstEuroX = toks[euroIdxs[0]].x;
+        const groups = groupDigitRunsBeforeX(toks, firstEuroX);
+        if (groups.length === 0) continue; // drop summary-like rows without quantity
+        const qtyGroup = groups.sort((a, b) => a.midX - b.midX).slice(-1)[0];
+        const quantity = qtyGroup ? parseInt(qtyGroup.text, 10) || 0 : 0;
+        if (!quantity) continue;
+
+        // SKU: use inline token; update lastSku
+        let sku = inlineSkuTok || prevSku || nextSku || lastSku || "-";
+        if (inlineSkuTok && inlineSkuTok !== lastSku) {
+          lastSku = inlineSkuTok;
+          lastSkuIndex = i;
+        } else if (prevSku && prevSku !== lastSku) {
+          lastSku = prevSku;
+          lastSkuIndex = i - 1;
+        } else if (nextSku && nextSku !== lastSku) {
+          lastSku = nextSku;
+          lastSkuIndex = i + 1;
+        }
+
+        // Description: accumulate multiple previous lines until reaching a stop line
+        const descParts: string[] = [];
+        const currY = ln.yPosition;
+        for (let j = i - 1; j >= 0; j--) {
+          const prev = lines[j];
+          const prevComp = fold(prev.text || "")
+            .toLowerCase()
+            .replace(/\s+/g, "")
+            .replace(/[^a-z0-9]/g, "");
+          if (prev.items.some((it) => (it.text || "").includes("€"))) break;
+          const dy = currY - prev.yPosition;
+          if (dy > 2.0) break; // too far up → end of description block
+          if (
+            fold(prev.text || "")
+              .toLowerCase()
+              .includes("sku:")
+          )
+            break; // stop at previous SKU
+          if (prevComp.includes("articlesquantiteprix")) break;
+          if (prevComp.includes("codehs") || prevComp.includes("paysdorigine"))
+            break; // stop at metadata
+          const part = collapseLine(prev);
+          if (part) descParts.unshift(part);
+          else break;
+        }
+        let description = descParts.join(" ").trim();
+        if (/sku\s*:/i.test(description)) {
+          description = description.replace(/sku\s*:[^\s]+/gi, "").trim();
+        }
+
+        result.lineItems.push({
+          supplierSku: sku || "-",
+          description: description || undefined,
+          quantity,
+          unitPrice,
+          total: totalPrice,
+        });
+      }
+    }
+
+    // Extract shipping (livraison) from summary area (robust)
+    if (!result.invoiceMetadata.shippingFee) {
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const ln = lines[i];
+        const txt = fold(ln.text || "").toLowerCase();
+        const compact = txt.replace(/\s+/g, "").replace(/[^a-z0-9]/g, "");
+        if (txt.includes("livraison") || compact.includes("livraison")) {
+          const toks = getSortedTokens(ln);
+          // Try tokens-based euro parse
+          let euroIdx = toks.findIndex((t) => t.t.includes("€"));
+          let val: number | null = null;
+          if (euroIdx >= 0) {
+            val = parseMonetaryFromEuroAt(toks, euroIdx);
+          }
+          // Fallback: regex over concatenated text
+          if (val == null) {
+            const joined = toks.map((t) => t.t).join("");
+            const m = joined.match(/€\s*([0-9][0-9\s.,]*)/);
+            if (m) {
+              const raw = (m[1] || "").replace(/\s+/g, "");
+              // normalize 1.234,56 or 1234.56
+              let num: number | null = null;
+              const m2 = raw.match(/^(.*?)[.,](\d{2})$/);
+              if (m2) {
+                const intPart = (m2[1] || "").replace(/[.,]/g, "");
+                const dec = m2[2];
+                if (/^[0-9]+$/.test(intPart)) {
+                  num = (parseInt(intPart, 10) * 100 + parseInt(dec, 10)) / 100;
+                }
+              } else if (/^[0-9]+$/.test(raw)) {
+                num = parseInt(raw, 10);
+              }
+              if (num != null) val = num;
+            }
+          }
+          if (val != null) {
+            result.invoiceMetadata.shippingFee = val;
+            break;
+          }
+        }
+      }
+    }
+
+    return { success: true, data: result };
+  }
+}
+
+// Liot - simple scaffold; parsing will be implemented after dump inspection
+class LiotParser implements InvoiceParser {
+  async parse(
+    textLines: Array<{
+      yPosition: number;
+      text: string;
+      items: Array<{ x: number; y: number; text: string; fontSize?: number }>;
+    }>,
+  ): Promise<PdfExtractionResult> {
+    const lines = [...textLines].sort((a, b) => a.yPosition - b.yPosition);
+    const result: ParsedInvoiceData = {
+      supplierInfo: {},
+      invoiceMetadata: { currency: "EUR", shippingFee: 0 },
+      lineItems: [],
+    };
+
+    // Detect the single item row by numeric patterns
+    const isPriceLike = (t: string) =>
+      /\d+[\s.,]\d{2,3}$/.test((t || "").replace(/\s+/g, ""));
+    const isInteger = (t: string) => /^\d+$/.test(t || "");
+    const parseFrenchNumber = (s: string): number | null => {
+      const cleaned = (s || "").replace(/\s+/g, "");
+      const m = cleaned.match(/^(.*?)[.,](\d{2,3})$/);
+      if (!m) return null;
+      const intPart = (m[1] || "").replace(/[.,]/g, "");
+      const dec = m[2];
+      if (!/^[0-9]+$/.test(intPart)) return null;
+      const scale = dec.length === 3 ? 1000 : 100;
+      return (parseInt(intPart, 10) * scale + parseInt(dec, 10)) / scale;
+    };
+    const collapseLine = (ln: (typeof lines)[number]): string => {
+      const toks = [...ln.items]
+        .map((it) => ({ x: it.x, t: (it.text || "").trim() }))
+        .filter((it) => it.t.length > 0)
+        .sort((a, b) => a.x - b.x);
+      let out = "";
+      let lastX = Number.NEGATIVE_INFINITY;
+      for (const tk of toks) {
+        if (out && tk.x - lastX > 0.6) out += " ";
+        out += tk.t;
+        lastX = tk.x;
+      }
+      return out.trim();
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+      const toks = [...lines[i].items]
+        .map((it) => ({ x: it.x, t: (it.text || "").trim() }))
+        .filter((it) => it.t.length > 0)
+        .sort((a, b) => a.x - b.x);
+      if (!toks.length) continue;
+      const hasPrice = toks.some((tk) => isPriceLike(tk.t));
+      const ints = toks.filter((tk) => isInteger(tk.t));
+      if (!hasPrice || ints.length === 0) continue;
+      // Quantity = rightmost integer before the first price-like token
+      const firstPriceIdx = toks.findIndex((tk) => isPriceLike(tk.t));
+      const firstPriceX =
+        firstPriceIdx >= 0 ? toks[firstPriceIdx].x : Number.POSITIVE_INFINITY;
+      const leftInts = toks.filter(
+        (tk) => tk.x < firstPriceX && isInteger(tk.t),
+      );
+      if (!leftInts.length) continue;
+      // Prefer the largest integer as quantity (handles extra small integers like 21 litre)
+      let quantity = 0;
+      for (const g of leftInts) {
+        const val = parseInt(g.t, 10) || 0;
+        if (val > quantity) quantity = val;
+      }
+      if (!quantity) continue;
+      const priceTokens = toks.filter((tk) => isPriceLike(tk.t));
+      const threeDec = priceTokens.find((tk) =>
+        /\d[\s.,]\d{3}$/.test((tk.t || "").replace(/\s+/g, "")),
+      );
+      const unitPrice =
+        parseFrenchNumber((threeDec || priceTokens[0])?.t || "") ?? 0;
+      const twoDecFromEnd = [...priceTokens]
+        .reverse()
+        .find((tk) => /\d[\s.,]\d{2}$/.test((tk.t || "").replace(/\s+/g, "")));
+      const total =
+        parseFrenchNumber(
+          (twoDecFromEnd || priceTokens[priceTokens.length - 1])?.t || "",
+        ) ?? 0;
+
+      // Description from tokens strictly left of first price; filter out qty integers and units like KG
+      const rawLine = lines[i];
+      const lineToks = [...rawLine.items]
+        .map((it) => ({ x: it.x, t: (it.text || "").trim() }))
+        .filter((it) => it.t.length > 0)
+        .sort((a, b) => a.x - b.x);
+      const descParts: string[] = [];
+      let lastX = Number.NEGATIVE_INFINITY;
+      for (let k = 0; k < lineToks.length; k++) {
+        const tk = lineToks[k];
+        if (tk.x >= firstPriceX - 0.5) break;
+        const isLargeInt = /^\d{3,}$/.test(tk.t);
+        const isKG = /^kg$/i.test(tk.t);
+        // Keep single-digit like "1" when followed by "litre"
+        if (isLargeInt || isKG) continue;
+        if (descParts.length > 0 && tk.x - lastX > 0.6) descParts.push(" ");
+        descParts.push(tk.t);
+        lastX = tk.x;
+      }
+      let description = descParts.join("").trim();
+      // Fallback to previous line if this looks like header/meta
+      if (!description || /^BL\s*n°/i.test(description)) {
+        description = collapseLine(lines[i - 1] || lines[i]);
+      }
+      // Extract SKU like BT05109, search around if not on same line
+      let supplierSku: string | undefined;
+      let skuMatch = description.match(/[A-Z]{2}\d{5}/);
+      if (!skuMatch) {
+        for (let k = 1; k <= 3; k++) {
+          const before = lines[i - k];
+          const after = lines[i + k];
+          if (before) {
+            const txt = collapseLine(before);
+            const m = txt.match(/[A-Z]{2}\d{5}/);
+            if (m) {
+              skuMatch = m;
+              break;
+            }
+          }
+          if (after) {
+            const txt = collapseLine(after);
+            const m = txt.match(/[A-Z]{2}\d{5}/);
+            if (m) {
+              skuMatch = m;
+              break;
+            }
+          }
+        }
+      }
+      if (skuMatch) {
+        supplierSku = skuMatch[0];
+        description = description.replace(supplierSku, "").trim();
+      }
+
+      if (supplierSku) {
+        result.lineItems.push({
+          supplierSku,
+          description: description || undefined,
+          quantity,
+          unitPrice,
+          total,
+        });
+        break; // single item expected
+      }
+    }
+
+    // Try to detect shipping from a line containing "livraison" as with other French docs
+
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const ln = lines[i];
+      const txt = (ln.text || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase();
+      const compact = txt.replace(/\s+/g, "").replace(/[^a-z0-9]/g, "");
+      if (txt.includes("livraison") || compact.includes("livraison")) {
+        const toks = [...ln.items]
+          .map((it) => ({ x: it.x, t: (it.text || "").trim() }))
+          .filter((it) => it.t.length > 0)
+          .sort((a, b) => a.x - b.x);
+        const euroIdx = toks.findIndex((t) => t.t.includes("€"));
+        if (euroIdx >= 0) {
+          let s = "";
+          for (let j = euroIdx; j < toks.length; j++) {
+            const tt = toks[j].t;
+            if (j > euroIdx && tt.includes("€")) break;
+            if (tt === "€" || /[0-9]/.test(tt) || tt === "." || tt === ",")
+              s += tt;
+            else break;
+          }
+          const cleaned = s.replace(/[^0-9.,]/g, "");
+          const m = cleaned.match(/(.*?)[.,](\d{2})$/);
+          let val: number | null = null;
+          if (m) {
+            const intPart = (m[1] || "").replace(/[.,]/g, "");
+            const dec = m[2];
+            if (/^[0-9]+$/.test(intPart)) {
+              val = (parseInt(intPart, 10) * 100 + parseInt(dec, 10)) / 100;
+            }
+          }
+          if (val != null) {
+            result.invoiceMetadata.shippingFee = val;
+            break;
+          }
+        }
+      }
+    }
+
+    return { success: true, data: result };
   }
 }
